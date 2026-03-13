@@ -735,29 +735,24 @@ export default function App(){
     const applyData=(data)=>{
       const m={};
       data.forEach(r=>{m[r.key]=r.data;});
-      if(m['aa_ventas'])               setVentas(v=>JSON.stringify(v)!==JSON.stringify(m['aa_ventas'])?m['aa_ventas']:v);
-      if(m['aa_products'])             setProducts(v=>JSON.stringify(v)!==JSON.stringify(m['aa_products'])?m['aa_products']:v);
-      if(m['aa_clientes'])             setClientes(v=>JSON.stringify(v)!==JSON.stringify(m['aa_clientes'])?m['aa_clientes']:v);
-      if(m['aa_abonos'])               setAbonos(v=>JSON.stringify(v)!==JSON.stringify(m['aa_abonos'])?m['aa_abonos']:v);
-      if(m['aa_movimientos'])          setMovs(v=>JSON.stringify(v)!==JSON.stringify(m['aa_movimientos'])?m['aa_movimientos']:v);
-      if(m['aa_gastos'])               setGastos(v=>JSON.stringify(v)!==JSON.stringify(m['aa_gastos'])?m['aa_gastos']:v);
-      if(m['aa_folio']!==undefined)    setFolioNum(m['aa_folio']);
+      if(m['aa_ventas'])            setVentas(m['aa_ventas']);
+      if(m['aa_products'])          setProducts(m['aa_products']);
+      if(m['aa_clientes'])          setClientes(m['aa_clientes']);
+      if(m['aa_abonos'])            setAbonos(m['aa_abonos']);
+      if(m['aa_movimientos'])       setMovs(m['aa_movimientos']);
+      if(m['aa_gastos'])            setGastos(m['aa_gastos']);
+      if(m['aa_folio']!==undefined) setFolioNum(m['aa_folio']);
     };
     const poll=async()=>{
       try{
-        /* cache:no-store fuerza datos frescos desde Supabase */
-        const res=await fetch(
-          `${import.meta.env.REACT_APP_SUPABASE_URL}/rest/v1/adornarte_store?key=in.(${POLL_KEYS.join(',')})&select=key,data`,
-          {headers:{
-            'apikey': import.meta.env.REACT_APP_SUPABASE_ANON_KEY,
-            'Authorization': `Bearer ${import.meta.env.REACT_APP_SUPABASE_ANON_KEY}`,
-            'Cache-Control':'no-cache, no-store',
-          }}
-        );
-        if(!res.ok){setSbOnline(false);return;}
-        const data=await res.json();
+        /* Agregar timestamp como columna ficticia para evitar cache */
+        const {data,error}=await supabase
+          .from('adornarte_store')
+          .select('key,data,updated_at')
+          .in('key',POLL_KEYS);
+        if(error){setSbOnline(false);return;}
         setSbOnline(true);
-        if(data) applyData(data);
+        if(data&&data.length>0) applyData(data);
       }catch{setSbOnline(false);}
     };
     poll();
