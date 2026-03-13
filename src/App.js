@@ -807,17 +807,17 @@ export default function App(){
         const {key,data}=payload.new||{};
         if(!key||data===undefined)return;
         switch(key){
-          case 'products':    setProducts(data);     break;
-          case 'clientes':    setClientes(data);     break;
-          case 'ventas':      setVentas(data);       break;
-          case 'movimientos': setMovs(data);         break;
-          case 'abonos':      setAbonos(data);       break;
-          case 'gastos':      setGastos(data);       break;
-          case 'catGastos':   setCatG(data);         break;
-          case 'proveedores': setProv(data);         break;
-          case 'cotizaciones':setCotiz(data);        break;
-          case 'devoluciones':setDevs(data);         break;
-          case 'config':      setConfig(c=>({...c,...data})); break;
+case 'aa_products':    setProducts(data);  break;
+case 'aa_clientes':    setClientes(data);  break;
+case 'aa_ventas':      setVentas(data);    break;
+case 'aa_movimientos': setMovs(data);      break;
+case 'aa_abonos':      setAbonos(data);    break;
+case 'aa_gastos':      setGastos(data);    break;
+case 'aa_catGastos':   setCatG(data);      break;
+case 'aa_proveedores': setProv(data);      break;
+case 'aa_cotizaciones':setCotiz(data);     break;
+case 'aa_devoluciones':setDevs(data);      break;
+case 'aa_config':      setConfig(c=>({...c,...data})); break;
           default: break;
         }
       })
