@@ -745,14 +745,23 @@ export default function App(){
     };
     const poll=async()=>{
       try{
-        const {data,error}=await supabase.from('adornarte_store').select('key,data').in('key',POLL_KEYS);
-        if(error){setSbOnline(false);return;}
+        /* cache:no-store fuerza datos frescos desde Supabase */
+        const res=await fetch(
+          `${import.meta.env.REACT_APP_SUPABASE_URL}/rest/v1/adornarte_store?key=in.(${POLL_KEYS.join(',')})&select=key,data`,
+          {headers:{
+            'apikey': import.meta.env.REACT_APP_SUPABASE_ANON_KEY,
+            'Authorization': `Bearer ${import.meta.env.REACT_APP_SUPABASE_ANON_KEY}`,
+            'Cache-Control':'no-cache, no-store',
+          }}
+        );
+        if(!res.ok){setSbOnline(false);return;}
+        const data=await res.json();
         setSbOnline(true);
         if(data) applyData(data);
       }catch{setSbOnline(false);}
     };
     poll();
-    pollTimer=setInterval(poll,3000);
+    pollTimer=setInterval(poll,1000);
     const handleOnline=()=>poll();
     const handleVisibility=()=>{ if(document.visibilityState==='visible') poll(); };
     window.addEventListener('online',handleOnline);
