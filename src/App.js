@@ -342,8 +342,15 @@ const printV=(v,c,cfg)=>{
 const openPDF=(html,filename='AdornArte.pdf')=>{
   const pw=window.open('','_blank');
   if(!pw){alert('Activa las ventanas emergentes para generar PDF');return;}
-  pw.document.write(html);pw.document.close();pw.focus();
-  setTimeout(()=>pw.print(),300);
+  pw.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
+    <style>@media print{.no-print{display:none!important}}</style></head><body>
+    <div class="no-print" style="background:#1e40af;color:#fff;padding:10px 20px;font-family:sans-serif;font-size:13px;display:flex;align-items:center;gap:12px;position:fixed;top:0;left:0;right:0;z-index:9999">
+      <span style="font-weight:700">📄 ${filename}</span>
+      <button onclick="window.print()" style="margin-left:auto;background:#fff;color:#1e40af;border:none;border-radius:6px;padding:7px 20px;font-weight:700;font-size:13px;cursor:pointer">🖨️ Guardar PDF / Imprimir</button>
+      <button onclick="window.close()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);border-radius:6px;padding:7px 14px;font-size:12px;cursor:pointer">✕ Cerrar</button>
+    </div>
+    <div style="height:52px"></div>${html.replace(/^<!DOCTYPE[^>]*>.*?<body[^>]*>/si,'').replace(/<\/body>.*$/si,'')}</body></html>`);
+  pw.document.close();pw.focus();
 };
 const pdfBase=(titulo,subtitulo,tableHead,tableBody,totalesRows='',cfg={})=>{
   const c={...DEFAULT_CONFIG,...cfg};
@@ -728,35 +735,21 @@ export default function App(){
     loadAll();
   },[]);// eslint-disable-line
 
-  /* ── SUPABASE: polling simple y confiable ── */
+  /* ── SUPABASE: indicador de conexión ─────────────────────── */
   useEffect(()=>{
-    let pollTimer;
-    const POLL_KEYS=['aa_ventas','aa_products','aa_clientes','aa_abonos','aa_movimientos','aa_gastos','aa_folio'];
-    const poll=async()=>{
+    let timer;
+    const checkOnline=async()=>{
       try{
-        const {data,error}=await supabase
-          .from('adornarte_store')
-          .select('key,data')
-          .in('key',POLL_KEYS);
-        if(error){setSbOnline(false);return;}
-        setSbOnline(true);
-        if(!data||data.length===0)return;
-        data.forEach(r=>{
-          if(r.key==='aa_ventas')      setVentas(r.data);
-          if(r.key==='aa_products')    setProducts(r.data);
-          if(r.key==='aa_clientes')    setClientes(r.data);
-          if(r.key==='aa_abonos')      setAbonos(r.data);
-          if(r.key==='aa_movimientos') setMovs(r.data);
-          if(r.key==='aa_gastos')      setGastos(r.data);
-          if(r.key==='aa_folio')       setFolioNum(r.data);
-        });
+        const {error}=await supabase.from('adornarte_store').select('key').limit(1);
+        setSbOnline(!error);
       }catch{setSbOnline(false);}
     };
-    poll();
-    pollTimer=setInterval(poll,3000);
-    const onVisible=()=>{ if(document.visibilityState==='visible') poll(); };
-    document.addEventListener('visibilitychange',onVisible);
-    return()=>{ clearInterval(pollTimer); document.removeEventListener('visibilitychange',onVisible); };
+    checkOnline();
+    timer=setInterval(checkOnline,30000);
+    /* Reintentar automáticamente cuando el navegador recupera internet */
+    const handleOnline=()=>{ setSbOnline(null); checkOnline(); };
+    window.addEventListener('online',handleOnline);
+    return()=>{ clearInterval(timer); window.removeEventListener('online',handleOnline); };
   },[]);// eslint-disable-line
 
   /* Reconectar manualmente y recargar datos desde Supabase */
@@ -810,21 +803,21 @@ export default function App(){
     if(_sbChannel)return;
     _sbChannel=supabase
       .channel('adornarte-sync')
-      .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_store'},payload=>{
+      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'adornarte_store'},payload=>{
         const {key,data}=payload.new||{};
         if(!key||data===undefined)return;
         switch(key){
-          case 'products':    setProducts(data);     break;
-          case 'clientes':    setClientes(data);     break;
-          case 'ventas':      setVentas(data);       break;
-          case 'movimientos': setMovs(data);         break;
-          case 'abonos':      setAbonos(data);       break;
-          case 'gastos':      setGastos(data);       break;
-          case 'catGastos':   setCatG(data);         break;
-          case 'proveedores': setProv(data);         break;
-          case 'cotizaciones':setCotiz(data);        break;
-          case 'devoluciones':setDevs(data);         break;
-          case 'config':      setConfig(c=>({...c,...data})); break;
+          case KEYS.products:    setProducts(data);     break;
+          case KEYS.clientes:    setClientes(data);     break;
+          case KEYS.ventas:      setVentas(data);       break;
+          case KEYS.movimientos: setMovs(data);         break;
+          case KEYS.abonos:      setAbonos(data);       break;
+          case KEYS.gastos:      setGastos(data);       break;
+          case KEYS.catGastos:   setCatG(data);         break;
+          case KEYS.proveedores: setProv(data);         break;
+          case KEYS.cotizaciones:setCotiz(data);        break;
+          case KEYS.devoluciones:setDevs(data);         break;
+          case KEYS.config:      setConfig(c=>({...c,...data})); break;
           default: break;
         }
       })
@@ -832,7 +825,16 @@ export default function App(){
     return()=>{ if(_sbChannel){supabase.removeChannel(_sbChannel);_sbChannel=null;} };
   },[]); // eslint-disable-line
 
-  /* ── SUPABASE AUTH: desactivado en versión web ── */
+  /* ── SUPABASE AUTH: recuperar sesión al recargar ─────────── */
+  useEffect(()=>{
+    supabase.auth.getSession().then(({data})=>{
+      if(data?.session?.user) setSbAuthUser(data.session.user);
+    });
+    const {data:{subscription}}=supabase.auth.onAuthStateChange((_,s)=>{
+      setSbAuthUser(s?.user||null);
+    });
+    return()=>subscription.unsubscribe();
+  },[]);
 
   /* ── AUTO-BACKUP desactivado ── */
 
@@ -1023,7 +1025,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   };
   const doLogout=()=>{
     if(session) logActividad('logout',`Cierre de sesión: ${session.nombre}`,{},session.nombre);
-    /* signOut desactivado */
+    try{supabase?.auth?.signOut();}catch{}
     setSession(null);setTab('Caja');
   };
 
@@ -2343,7 +2345,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
               <div style={{fontSize:9,color:C.pinkText}}>{ROLES[session.rol]}</div>
             </div>
             <button onClick={doLogout} title="Cerrar sesión" style={{background:'transparent',border:'none',color:C.pinkText,fontSize:14,cursor:'pointer',padding:2}}>🚪</button>
-            <span title={sbOnline===null?'Verificando…':sbOnline?`Online`:sbAuthUser?'Offline · Auth✓':'Offline'} style={{display:'inline-flex',alignItems:'center',gap:2,fontSize:9,fontWeight:700,color:sbOnline===null?C.textLight:sbOnline?C.green:C.amber,cursor:'default',userSelect:'none',padding:2}}>
+            <span title={sbOnline===null?'Verificando…':sbOnline?`Online${sbAuthUser?' · Auth✓':''}`:sbAuthUser?'Offline · Auth✓':'Offline'} style={{display:'inline-flex',alignItems:'center',gap:2,fontSize:9,fontWeight:700,color:sbOnline===null?C.textLight:sbOnline?C.green:C.amber,cursor:'default',userSelect:'none',padding:2}}>
               <span style={{width:6,height:6,borderRadius:'50%',background:sbOnline===null?C.textLight:sbOnline?C.green:C.amber,display:'inline-block',flexShrink:0,boxShadow:sbOnline?`0 0 4px ${C.green}`:''}}/>
             </span>
             {!sbOnline&&<button onClick={sbReconnect} disabled={sbReconnecting} title="Reconectar con Supabase" style={{background:C.amberLight,border:`1px solid ${C.amberBorder}`,color:C.amber,borderRadius:7,padding:'2px 7px',fontSize:10,fontWeight:700,cursor:sbReconnecting?'not-allowed':'pointer',display:'inline-flex',alignItems:'center',gap:3}}>
@@ -5518,6 +5520,57 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
   </div>;
 })()}
 
+{/* ════════════ MODAL: ETIQUETAS DE PRECIO ════════════ */}
+{modal==='etiquetas'&&(()=>{
+  const filtradosEtq=products.filter(p=>!busqEtq||p.nombre.toLowerCase().includes(busqEtq.toLowerCase())||p.categoria?.toLowerCase().includes(busqEtq.toLowerCase()));
+  const toggleSel=id=>setSelIds(ids=>ids.includes(id)?ids.filter(x=>x!==id):[...ids,id]);
+  const selAll=()=>setSelIds(filtradosEtq.map(p=>p.id));
+  const clearSel=()=>setSelIds([]);
+  return<Modal title="🏷️ Imprimir Etiquetas de Precio" onClose={closeModal} wide>
+    <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:10,flexWrap:'wrap'}}>
+      <label style={{...S.label,marginBottom:0}}>Tamaño:</label>
+      {[['mini','Mini (4×2.2cm)'],['chico','Chico (6×3.5cm)'],['med','Mediano (8×5cm)'],['grande','Grande (10×6.5cm)']].map(([v,l])=>(
+        <button key={v} onClick={()=>setTamano(v)} style={{...S.btnSm,background:tamano===v?C.pink:C.pinkLight,color:tamano===v?'#fff':C.pink,fontSize:10}}>{l}</button>
+      ))}
+      <span style={{marginLeft:'auto',fontSize:11,color:C.textMid}}>{selIds.length} productos · <strong>{selIds.reduce((a,id)=>a+Math.max(1,+(etiqCopias[id]||1)),0)}</strong> etiq.</span>
+      <button onClick={selAll} style={{...S.btnSm,fontSize:10}}>Todos</button>
+      <button onClick={clearSel} style={{...S.btnDanger,fontSize:10,padding:'4px 9px'}}>Limpiar</button>
+    </div>
+    <div style={{position:'relative',marginBottom:9}}>
+      <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight}}>🔍</span>
+      <input style={S.searchBar} value={busqEtq} onChange={e=>setBusqEtq(e.target.value)} placeholder="Buscar producto..."/>
+    </div>
+    <div style={{maxHeight:350,overflowY:'auto',border:`1px solid ${C.border}`,borderRadius:10,marginBottom:14}}>
+      <table style={S.table}><thead><tr><th style={S.th}>☑</th>{['Producto','Categoría','Precio','Copias'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+      <tbody>{filtradosEtq.map(p=>(
+        <tr key={p.id} onClick={()=>toggleSel(p.id)} style={{cursor:'pointer',background:selIds.includes(p.id)?C.pinkLight:''}}>
+          <td style={{...S.td,width:36,textAlign:'center'}}>
+            <input type="checkbox" checked={selIds.includes(p.id)} onChange={()=>toggleSel(p.id)} style={{accentColor:C.pink,width:14,height:14}}/>
+          </td>
+          <td style={{...S.td,fontWeight:600,fontSize:12}}>{p.nombre}</td>
+          <td style={{...S.td,fontSize:11,color:C.textMid}}>{p.categoria}</td>
+          <td style={{...S.td,fontWeight:700,color:C.pink}}>{fmt(p.precio)}</td>
+          <td style={{...S.td,width:68}} onClick={e=>e.stopPropagation()}>
+            <input type="number" min="1"
+              value={etiqCopias[p.id]||1}
+              onChange={e=>setEtiqCopias(c=>({...c,[p.id]:Math.max(1,+e.target.value||1)}))}
+              style={{width:56,textAlign:'center',border:`1px solid ${C.border}`,borderRadius:6,padding:'4px 5px',fontSize:12,fontWeight:700,background:selIds.includes(p.id)?'#fff':C.sidebar,color:selIds.includes(p.id)?C.text:C.textLight}}/>
+          </td>
+        </tr>
+      ))}</tbody></table>
+    </div>
+    <div style={{display:'flex',gap:8}}>
+      <button onClick={()=>{printEtiquetas(selIds,tamano,etiqCopias,false);closeModal();}} disabled={selIds.length===0}
+        style={{...S.btnFull,flex:1,opacity:selIds.length===0?0.5:1,margin:0}}>
+        🖨️ Imprimir {selIds.reduce((a,id)=>a+Math.max(1,+(etiqCopias[id]||1)),0)} etiqueta{selIds.reduce((a,id)=>a+Math.max(1,+(etiqCopias[id]||1)),0)!==1?'s':''}
+      </button>
+      <button onClick={()=>{printEtiquetas(selIds,tamano,etiqCopias,true);closeModal();}} disabled={selIds.length===0}
+        style={{...S.btnFull,flex:1,opacity:selIds.length===0?0.5:1,margin:0,background:selIds.length===0?C.textLight:'#1e40af'}}>
+        📄 Exportar PDF
+      </button>
+    </div>
+  </Modal>;
+})()}
 
 {modal==='confirm'&&confAct&&(
   <Modal title="⚠️ Confirmar" onClose={closeModal}>
@@ -5628,7 +5681,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
           <span style={{width:7,height:7,borderRadius:'50%',background:sbOnline?C.green:C.amber,display:'inline-block'}}/>
           {sbOnline?'Supabase Conectado':'Sin conexión'}
         </span>
-
+        {sbAuthUser&&<span style={{fontSize:11,color:C.blue,background:C.blueLight,border:`1px solid ${C.blueBorder}`,borderRadius:20,padding:'4px 10px',fontWeight:700}}>🔐 Auth: {sbAuthUser.email?.split('@')[0]}</span>}
         <button onClick={loadActividad} style={{...S.btnOutline,padding:'6px 14px',fontSize:11,display:'flex',alignItems:'center',gap:5}}>🔄 Actualizar</button>
         <button onClick={backupSupabase} disabled={!sbOnline} style={{...S.btn,padding:'6px 14px',fontSize:11,display:'flex',alignItems:'center',gap:5,background:sbOnline?C.blue:C.textLight,cursor:sbOnline?'pointer':'not-allowed'}}>☁️ Backup Ahora</button>
         <button onClick={()=>loadSbBackups()} disabled={sbBackupsLoading} style={{...S.btn,padding:'6px 14px',fontSize:11,display:'flex',alignItems:'center',gap:5,background:C.teal,cursor:'pointer'}}>
