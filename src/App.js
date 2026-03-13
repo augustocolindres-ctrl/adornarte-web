@@ -728,65 +728,36 @@ export default function App(){
     loadAll();
   },[]);// eslint-disable-line
 
-  /* ── SUPABASE: indicador de conexión + polling de sincronización ── */
+  /* ── SUPABASE: polling cada 3s + reconexión automática ── */
   useEffect(()=>{
-    let timer; let pollTimer;
-    const checkOnline=async()=>{
-      try{
-        const {error}=await supabase.from('adornarte_store').select('key').limit(1);
-        setSbOnline(!error);
-      }catch{setSbOnline(false);}
+    let pollTimer;
+    const POLL_KEYS=['aa_ventas','aa_products','aa_clientes','aa_abonos','aa_movimientos','aa_gastos','aa_folio'];
+    const applyData=(data)=>{
+      const m={};
+      data.forEach(r=>{m[r.key]=r.data;});
+      if(m['aa_ventas'])               setVentas(v=>JSON.stringify(v)!==JSON.stringify(m['aa_ventas'])?m['aa_ventas']:v);
+      if(m['aa_products'])             setProducts(v=>JSON.stringify(v)!==JSON.stringify(m['aa_products'])?m['aa_products']:v);
+      if(m['aa_clientes'])             setClientes(v=>JSON.stringify(v)!==JSON.stringify(m['aa_clientes'])?m['aa_clientes']:v);
+      if(m['aa_abonos'])               setAbonos(v=>JSON.stringify(v)!==JSON.stringify(m['aa_abonos'])?m['aa_abonos']:v);
+      if(m['aa_movimientos'])          setMovs(v=>JSON.stringify(v)!==JSON.stringify(m['aa_movimientos'])?m['aa_movimientos']:v);
+      if(m['aa_gastos'])               setGastos(v=>JSON.stringify(v)!==JSON.stringify(m['aa_gastos'])?m['aa_gastos']:v);
+      if(m['aa_folio']!==undefined)    setFolioNum(m['aa_folio']);
     };
-    /* Polling cada 5s — sincroniza datos sin depender de Realtime */
-    const pollData=async()=>{
+    const poll=async()=>{
       try{
-        const {data,error}=await supabase.from('adornarte_store')
-          .select('key,data')
-          .in('key',['aa_ventas','aa_products','aa_clientes','aa_abonos','aa_movimientos','aa_gastos','aa_folio']);
-        if(error||!data)return;
-        const m={};
-        data.forEach(r=>{m[r.key]=r.data;});
-        if(m['aa_ventas'])      setVentas(m['aa_ventas']);
-        if(m['aa_products'])    setProducts(m['aa_products']);
-        if(m['aa_clientes'])    setClientes(m['aa_clientes']);
-        if(m['aa_abonos'])      setAbonos(m['aa_abonos']);
-        if(m['aa_movimientos']) setMovs(m['aa_movimientos']);
-        if(m['aa_gastos'])      setGastos(m['aa_gastos']);
-        if(m['aa_folio']!==undefined) setFolioNum(m['aa_folio']);
-      }catch{}
-    };
-    checkOnline();
-    timer=setInterval(async()=>{
-      await checkOnline();
-      /* Si está offline, intentar reconectar automáticamente */
-    },30000);
-    /* Sincronizar al instante cuando el usuario regresa a la pestaña */
-    const handleVisibility=()=>{ if(document.visibilityState==='visible') pollData(); };
-    document.addEventListener('visibilitychange',handleVisibility);
-    pollTimer=setInterval(async()=>{
-      /* Si está offline, intentar reconectar solo */
-      try{
-        const {data,error}=await supabase.from('adornarte_store')
-          .select('key,data')
-          .in('key',['aa_ventas','aa_products','aa_clientes','aa_abonos','aa_movimientos','aa_gastos','aa_folio']);
+        const {data,error}=await supabase.from('adornarte_store').select('key,data').in('key',POLL_KEYS);
         if(error){setSbOnline(false);return;}
         setSbOnline(true);
-        if(!data)return;
-        const m={};
-        data.forEach(r=>{m[r.key]=r.data;});
-        if(m['aa_ventas'])      setVentas(m['aa_ventas']);
-        if(m['aa_products'])    setProducts(m['aa_products']);
-        if(m['aa_clientes'])    setClientes(m['aa_clientes']);
-        if(m['aa_abonos'])      setAbonos(m['aa_abonos']);
-        if(m['aa_movimientos']) setMovs(m['aa_movimientos']);
-        if(m['aa_gastos'])      setGastos(m['aa_gastos']);
-        if(m['aa_folio']!==undefined) setFolioNum(m['aa_folio']);
+        if(data) applyData(data);
       }catch{setSbOnline(false);}
-    },2000);
-    /* Reintentar automáticamente cuando el navegador recupera internet */
-    const handleOnline=()=>{ setSbOnline(null); checkOnline(); pollData(); };
+    };
+    poll();
+    pollTimer=setInterval(poll,3000);
+    const handleOnline=()=>poll();
+    const handleVisibility=()=>{ if(document.visibilityState==='visible') poll(); };
     window.addEventListener('online',handleOnline);
-    return()=>{ clearInterval(timer); clearInterval(pollTimer); window.removeEventListener('online',handleOnline); document.removeEventListener('visibilitychange',handleVisibility); };
+    document.addEventListener('visibilitychange',handleVisibility);
+    return()=>{ clearInterval(pollTimer); window.removeEventListener('online',handleOnline); document.removeEventListener('visibilitychange',handleVisibility); };
   },[]);// eslint-disable-line
 
   /* Reconectar manualmente y recargar datos desde Supabase */
