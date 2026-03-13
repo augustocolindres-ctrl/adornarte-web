@@ -728,21 +728,40 @@ export default function App(){
     loadAll();
   },[]);// eslint-disable-line
 
-  /* ── SUPABASE: indicador de conexión ─────────────────────── */
+  /* ── SUPABASE: indicador de conexión + polling de sincronización ── */
   useEffect(()=>{
-    let timer;
+    let timer; let pollTimer;
     const checkOnline=async()=>{
       try{
         const {error}=await supabase.from('adornarte_store').select('key').limit(1);
         setSbOnline(!error);
       }catch{setSbOnline(false);}
     };
+    /* Polling cada 5s — sincroniza datos sin depender de Realtime */
+    const pollData=async()=>{
+      try{
+        const {data,error}=await supabase.from('adornarte_store')
+          .select('key,data')
+          .in('key',['aa_ventas','aa_products','aa_clientes','aa_abonos','aa_movimientos','aa_gastos','aa_folio']);
+        if(error||!data)return;
+        const m={};
+        data.forEach(r=>{m[r.key]=r.data;});
+        if(m['aa_ventas'])      setVentas(m['aa_ventas']);
+        if(m['aa_products'])    setProducts(m['aa_products']);
+        if(m['aa_clientes'])    setClientes(m['aa_clientes']);
+        if(m['aa_abonos'])      setAbonos(m['aa_abonos']);
+        if(m['aa_movimientos']) setMovs(m['aa_movimientos']);
+        if(m['aa_gastos'])      setGastos(m['aa_gastos']);
+        if(m['aa_folio']!==undefined) setFolioNum(m['aa_folio']);
+      }catch{}
+    };
     checkOnline();
     timer=setInterval(checkOnline,30000);
+    pollTimer=setInterval(pollData,5000);
     /* Reintentar automáticamente cuando el navegador recupera internet */
-    const handleOnline=()=>{ setSbOnline(null); checkOnline(); };
+    const handleOnline=()=>{ setSbOnline(null); checkOnline(); pollData(); };
     window.addEventListener('online',handleOnline);
-    return()=>{ clearInterval(timer); window.removeEventListener('online',handleOnline); };
+    return()=>{ clearInterval(timer); clearInterval(pollTimer); window.removeEventListener('online',handleOnline); };
   },[]);// eslint-disable-line
 
   /* Reconectar manualmente y recargar datos desde Supabase */
