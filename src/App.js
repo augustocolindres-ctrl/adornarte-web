@@ -804,7 +804,7 @@ export default function App(){
     _sbChannel=supabase
       .channel('adornarte-sync')
       .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_store'},payload=>{
-        const {key,data}=payload.new||{};
+        console.log('REALTIME PAYLOAD:', payload); const {key,data}=payload.new||{};
         if(!key||data===undefined)return;
         switch(key){
 case 'aa_products':    setProducts(data);  break;
