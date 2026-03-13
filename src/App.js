@@ -796,7 +796,7 @@ export default function App(){
     if(_sbChannel)return;
     _sbChannel=supabase
       .channel('adornarte-sync')
-      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'adornarte_store'},payload=>{
+      .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_store'},payload=>{
         const {key,data}=payload.new||{};
         if(!key||data===undefined)return;
         switch(key){
