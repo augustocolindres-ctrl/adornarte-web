@@ -1,8 +1,8 @@
 {
-  "buildCommand": "CI=false npm run build",
+  "buildCommand": "vite build",
   "outputDirectory": "build",
-  "installCommand": "npm install --legacy-peer-deps --force",
-  "framework": "create-react-app",
+  "installCommand": "npm install",
+  "framework": "vite",
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }
   ]
