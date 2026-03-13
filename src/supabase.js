@@ -1,14 +1,18 @@
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL      = import.meta.env.VITE_SUPABASE_URL      || '';
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const SUPABASE_URL      = import.meta.env.REACT_APP_SUPABASE_URL      || '';
+const SUPABASE_ANON_KEY = import.meta.env.REACT_APP_SUPABASE_ANON_KEY || '';
 
 /* Si las variables de entorno están vacías, devuelve un stub offline para
    que la app nunca explote antes de llegar al login */
 let supabase;
 try {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error('env missing');
-  supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+  supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+    global: {
+      fetch: (url, options = {}) => fetch(url, { ...options, cache: 'no-store' }),
+    },
+  });
 } catch(e) {
   console.warn('Supabase no configurado — modo offline:', e.message);
   const noop = () => Promise.resolve({ data: [], error: { message: 'offline' } });
