@@ -342,15 +342,8 @@ const printV=(v,c,cfg)=>{
 const openPDF=(html,filename='AdornArte.pdf')=>{
   const pw=window.open('','_blank');
   if(!pw){alert('Activa las ventanas emergentes para generar PDF');return;}
-  pw.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8">
-    <style>@media print{.no-print{display:none!important}}</style></head><body>
-    <div class="no-print" style="background:#1e40af;color:#fff;padding:10px 20px;font-family:sans-serif;font-size:13px;display:flex;align-items:center;gap:12px;position:fixed;top:0;left:0;right:0;z-index:9999">
-      <span style="font-weight:700">📄 ${filename}</span>
-      <button onclick="window.print()" style="margin-left:auto;background:#fff;color:#1e40af;border:none;border-radius:6px;padding:7px 20px;font-weight:700;font-size:13px;cursor:pointer">🖨️ Guardar PDF / Imprimir</button>
-      <button onclick="window.close()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);border-radius:6px;padding:7px 14px;font-size:12px;cursor:pointer">✕ Cerrar</button>
-    </div>
-    <div style="height:52px"></div>${html.replace(/^<!DOCTYPE[^>]*>.*?<body[^>]*>/si,'').replace(/<\/body>.*$/si,'')}</body></html>`);
-  pw.document.close();pw.focus();
+  pw.document.write(html);pw.document.close();pw.focus();
+  setTimeout(()=>pw.print(),300);
 };
 const pdfBase=(titulo,subtitulo,tableHead,tableBody,totalesRows='',cfg={})=>{
   const c={...DEFAULT_CONFIG,...cfg};
@@ -803,21 +796,21 @@ export default function App(){
     if(_sbChannel)return;
     _sbChannel=supabase
       .channel('adornarte-sync')
-      .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_store'},payload=>{
-        console.log('REALTIME PAYLOAD:', payload); const {key,data}=payload.new||{};
+      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'adornarte_store'},payload=>{
+        const {key,data}=payload.new||{};
         if(!key||data===undefined)return;
         switch(key){
-case 'aa_products':    setProducts(data);  break;
-case 'aa_clientes':    setClientes(data);  break;
-case 'aa_ventas':      setVentas(data);    break;
-case 'aa_movimientos': setMovs(data);      break;
-case 'aa_abonos':      setAbonos(data);    break;
-case 'aa_gastos':      setGastos(data);    break;
-case 'aa_catGastos':   setCatG(data);      break;
-case 'aa_proveedores': setProv(data);      break;
-case 'aa_cotizaciones':setCotiz(data);     break;
-case 'aa_devoluciones':setDevs(data);      break;
-case 'aa_config':      setConfig(c=>({...c,...data})); break;
+          case 'products':    setProducts(data);     break;
+          case 'clientes':    setClientes(data);     break;
+          case 'ventas':      setVentas(data);       break;
+          case 'movimientos': setMovs(data);         break;
+          case 'abonos':      setAbonos(data);       break;
+          case 'gastos':      setGastos(data);       break;
+          case 'catGastos':   setCatG(data);         break;
+          case 'proveedores': setProv(data);         break;
+          case 'cotizaciones':setCotiz(data);        break;
+          case 'devoluciones':setDevs(data);         break;
+          case 'config':      setConfig(c=>({...c,...data})); break;
           default: break;
         }
       })
@@ -5531,57 +5524,6 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
   </div>;
 })()}
 
-{/* ════════════ MODAL: ETIQUETAS DE PRECIO ════════════ */}
-{modal==='etiquetas'&&(()=>{
-  const filtradosEtq=products.filter(p=>!busqEtq||p.nombre.toLowerCase().includes(busqEtq.toLowerCase())||p.categoria?.toLowerCase().includes(busqEtq.toLowerCase()));
-  const toggleSel=id=>setSelIds(ids=>ids.includes(id)?ids.filter(x=>x!==id):[...ids,id]);
-  const selAll=()=>setSelIds(filtradosEtq.map(p=>p.id));
-  const clearSel=()=>setSelIds([]);
-  return<Modal title="🏷️ Imprimir Etiquetas de Precio" onClose={closeModal} wide>
-    <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:10,flexWrap:'wrap'}}>
-      <label style={{...S.label,marginBottom:0}}>Tamaño:</label>
-      {[['mini','Mini (4×2.2cm)'],['chico','Chico (6×3.5cm)'],['med','Mediano (8×5cm)'],['grande','Grande (10×6.5cm)']].map(([v,l])=>(
-        <button key={v} onClick={()=>setTamano(v)} style={{...S.btnSm,background:tamano===v?C.pink:C.pinkLight,color:tamano===v?'#fff':C.pink,fontSize:10}}>{l}</button>
-      ))}
-      <span style={{marginLeft:'auto',fontSize:11,color:C.textMid}}>{selIds.length} productos · <strong>{selIds.reduce((a,id)=>a+Math.max(1,+(etiqCopias[id]||1)),0)}</strong> etiq.</span>
-      <button onClick={selAll} style={{...S.btnSm,fontSize:10}}>Todos</button>
-      <button onClick={clearSel} style={{...S.btnDanger,fontSize:10,padding:'4px 9px'}}>Limpiar</button>
-    </div>
-    <div style={{position:'relative',marginBottom:9}}>
-      <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight}}>🔍</span>
-      <input style={S.searchBar} value={busqEtq} onChange={e=>setBusqEtq(e.target.value)} placeholder="Buscar producto..."/>
-    </div>
-    <div style={{maxHeight:350,overflowY:'auto',border:`1px solid ${C.border}`,borderRadius:10,marginBottom:14}}>
-      <table style={S.table}><thead><tr><th style={S.th}>☑</th>{['Producto','Categoría','Precio','Copias'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
-      <tbody>{filtradosEtq.map(p=>(
-        <tr key={p.id} onClick={()=>toggleSel(p.id)} style={{cursor:'pointer',background:selIds.includes(p.id)?C.pinkLight:''}}>
-          <td style={{...S.td,width:36,textAlign:'center'}}>
-            <input type="checkbox" checked={selIds.includes(p.id)} onChange={()=>toggleSel(p.id)} style={{accentColor:C.pink,width:14,height:14}}/>
-          </td>
-          <td style={{...S.td,fontWeight:600,fontSize:12}}>{p.nombre}</td>
-          <td style={{...S.td,fontSize:11,color:C.textMid}}>{p.categoria}</td>
-          <td style={{...S.td,fontWeight:700,color:C.pink}}>{fmt(p.precio)}</td>
-          <td style={{...S.td,width:68}} onClick={e=>e.stopPropagation()}>
-            <input type="number" min="1"
-              value={etiqCopias[p.id]||1}
-              onChange={e=>setEtiqCopias(c=>({...c,[p.id]:Math.max(1,+e.target.value||1)}))}
-              style={{width:56,textAlign:'center',border:`1px solid ${C.border}`,borderRadius:6,padding:'4px 5px',fontSize:12,fontWeight:700,background:selIds.includes(p.id)?'#fff':C.sidebar,color:selIds.includes(p.id)?C.text:C.textLight}}/>
-          </td>
-        </tr>
-      ))}</tbody></table>
-    </div>
-    <div style={{display:'flex',gap:8}}>
-      <button onClick={()=>{printEtiquetas(selIds,tamano,etiqCopias,false);closeModal();}} disabled={selIds.length===0}
-        style={{...S.btnFull,flex:1,opacity:selIds.length===0?0.5:1,margin:0}}>
-        🖨️ Imprimir {selIds.reduce((a,id)=>a+Math.max(1,+(etiqCopias[id]||1)),0)} etiqueta{selIds.reduce((a,id)=>a+Math.max(1,+(etiqCopias[id]||1)),0)!==1?'s':''}
-      </button>
-      <button onClick={()=>{printEtiquetas(selIds,tamano,etiqCopias,true);closeModal();}} disabled={selIds.length===0}
-        style={{...S.btnFull,flex:1,opacity:selIds.length===0?0.5:1,margin:0,background:selIds.length===0?C.textLight:'#1e40af'}}>
-        📄 Exportar PDF
-      </button>
-    </div>
-  </Modal>;
-})()}
 
 {modal==='confirm'&&confAct&&(
   <Modal title="⚠️ Confirmar" onClose={closeModal}>
