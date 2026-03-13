@@ -1065,17 +1065,6 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
     if(!u){setLoginErr('Usuario o contraseña incorrectos');return;}
     setSession(u); setLoginErr(''); setLoginU(''); setLoginC('');
     showToast(`Bienvenida, ${u.nombre} 🌸`);
-    /* Supabase Auth: login/registro silencioso */
-    try{
-      if(!supabase?.auth)throw new Error('no auth');
-      const email=`${loginU.trim()}@adornarte.local`;
-      const {error}=await supabase.auth.signInWithPassword({email,password:loginC.trim()});
-      if(error?.status===400||error?.message?.toLowerCase().includes('invalid')){
-        /* Primera vez: registra en Supabase Auth */
-        await supabase.auth.signUp({email,password:loginC.trim(),options:{data:{nombre:u.nombre,rol:u.rol}}});
-        await supabase.auth.signInWithPassword({email,password:loginC.trim()});
-      }
-    }catch{}
     logActividad('login',`Inicio de sesión: ${u.nombre}`,{rol:u.rol},u.nombre);
   };
   const doLogout=()=>{
