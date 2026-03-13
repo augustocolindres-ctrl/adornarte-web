@@ -728,54 +728,20 @@ export default function App(){
     loadAll();
   },[]);// eslint-disable-line
 
-  /* ── SUPABASE: sync inteligente — detecta cambios por updated_at ── */
+  /* ── SUPABASE: polling simple y confiable ── */
   useEffect(()=>{
     let pollTimer;
-    let lastUpdated={};
     const POLL_KEYS=['aa_ventas','aa_products','aa_clientes','aa_abonos','aa_movimientos','aa_gastos','aa_folio'];
-    const SUPABASE_URL=import.meta.env.REACT_APP_SUPABASE_URL;
-    const SUPABASE_KEY=import.meta.env.REACT_APP_SUPABASE_ANON_KEY;
-
-    const fetchFresh=async(keys)=>{
-      const qs=keys.map(k=>`'${k}'`).join(',');
-      const res=await fetch(
-        `${SUPABASE_URL}/rest/v1/adornarte_store?key=in.(${qs})&select=key,data,updated_at`,
-        {cache:'no-store',headers:{
-          'apikey':SUPABASE_KEY,
-          'Authorization':`Bearer ${SUPABASE_KEY}`,
-        }}
-      );
-      if(!res.ok) return null;
-      return res.json();
-    };
-
     const poll=async()=>{
       try{
-        /* Paso 1: Verificar timestamps — muy liviano */
-        const res=await fetch(
-          `${SUPABASE_URL}/rest/v1/adornarte_store?key=in.(${POLL_KEYS.map(k=>`'${k}'`).join(',')})&select=key,updated_at`,
-          {cache:'no-store',headers:{
-            'apikey':SUPABASE_KEY,
-            'Authorization':`Bearer ${SUPABASE_KEY}`,
-          }}
-        );
-        if(!res.ok){setSbOnline(false);return;}
+        const {data,error}=await supabase
+          .from('adornarte_store')
+          .select('key,data')
+          .in('key',POLL_KEYS);
+        if(error){setSbOnline(false);return;}
         setSbOnline(true);
-        const timestamps=await res.json();
-        
-        /* Paso 2: Detectar qué cambió */
-        const changedKeys=timestamps
-          .filter(r=>lastUpdated[r.key]!==r.updated_at)
-          .map(r=>r.key);
-        
-        if(changedKeys.length===0) return; /* Nada cambió */
-        
-        /* Paso 3: Solo cargar los que cambiaron */
-        const freshData=await fetchFresh(changedKeys);
-        if(!freshData) return;
-        
-        freshData.forEach(r=>{
-          lastUpdated[r.key]=r.updated_at;
+        if(!data||data.length===0)return;
+        data.forEach(r=>{
           if(r.key==='aa_ventas')      setVentas(r.data);
           if(r.key==='aa_products')    setProducts(r.data);
           if(r.key==='aa_clientes')    setClientes(r.data);
@@ -786,14 +752,11 @@ export default function App(){
         });
       }catch{setSbOnline(false);}
     };
-
     poll();
     pollTimer=setInterval(poll,3000);
-    const handleOnline=()=>poll();
-    const handleVisibility=()=>{ if(document.visibilityState==='visible') poll(); };
-    window.addEventListener('online',handleOnline);
-    document.addEventListener('visibilitychange',handleVisibility);
-    return()=>{ clearInterval(pollTimer); window.removeEventListener('online',handleOnline); document.removeEventListener('visibilitychange',handleVisibility); };
+    const onVisible=()=>{ if(document.visibilityState==='visible') poll(); };
+    document.addEventListener('visibilitychange',onVisible);
+    return()=>{ clearInterval(pollTimer); document.removeEventListener('visibilitychange',onVisible); };
   },[]);// eslint-disable-line
 
   /* Reconectar manualmente y recargar datos desde Supabase */
@@ -869,16 +832,7 @@ export default function App(){
     return()=>{ if(_sbChannel){supabase.removeChannel(_sbChannel);_sbChannel=null;} };
   },[]); // eslint-disable-line
 
-  /* ── SUPABASE AUTH: recuperar sesión al recargar ─────────── */
-  useEffect(()=>{
-    supabase.auth.getSession().then(({data})=>{
-      if(data?.session?.user) setSbAuthUser(data.session.user);
-    });
-    const {data:{subscription}}=supabase.auth.onAuthStateChange((_,s)=>{
-      setSbAuthUser(s?.user||null);
-    });
-    return()=>subscription.unsubscribe();
-  },[]);
+  /* ── SUPABASE AUTH: desactivado en versión web ── */
 
   /* ── AUTO-BACKUP desactivado ── */
 
@@ -1069,7 +1023,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   };
   const doLogout=()=>{
     if(session) logActividad('logout',`Cierre de sesión: ${session.nombre}`,{},session.nombre);
-    try{supabase?.auth?.signOut();}catch{}
+    /* signOut desactivado */
     setSession(null);setTab('Caja');
   };
 
@@ -2389,7 +2343,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
               <div style={{fontSize:9,color:C.pinkText}}>{ROLES[session.rol]}</div>
             </div>
             <button onClick={doLogout} title="Cerrar sesión" style={{background:'transparent',border:'none',color:C.pinkText,fontSize:14,cursor:'pointer',padding:2}}>🚪</button>
-            <span title={sbOnline===null?'Verificando…':sbOnline?`Online${sbAuthUser?' · Auth✓':''}`:sbAuthUser?'Offline · Auth✓':'Offline'} style={{display:'inline-flex',alignItems:'center',gap:2,fontSize:9,fontWeight:700,color:sbOnline===null?C.textLight:sbOnline?C.green:C.amber,cursor:'default',userSelect:'none',padding:2}}>
+            <span title={sbOnline===null?'Verificando…':sbOnline?`Online`:sbAuthUser?'Offline · Auth✓':'Offline'} style={{display:'inline-flex',alignItems:'center',gap:2,fontSize:9,fontWeight:700,color:sbOnline===null?C.textLight:sbOnline?C.green:C.amber,cursor:'default',userSelect:'none',padding:2}}>
               <span style={{width:6,height:6,borderRadius:'50%',background:sbOnline===null?C.textLight:sbOnline?C.green:C.amber,display:'inline-block',flexShrink:0,boxShadow:sbOnline?`0 0 4px ${C.green}`:''}}/>
             </span>
             {!sbOnline&&<button onClick={sbReconnect} disabled={sbReconnecting} title="Reconectar con Supabase" style={{background:C.amberLight,border:`1px solid ${C.amberBorder}`,color:C.amber,borderRadius:7,padding:'2px 7px',fontSize:10,fontWeight:700,cursor:sbReconnecting?'not-allowed':'pointer',display:'inline-flex',alignItems:'center',gap:3}}>
@@ -5674,7 +5628,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
           <span style={{width:7,height:7,borderRadius:'50%',background:sbOnline?C.green:C.amber,display:'inline-block'}}/>
           {sbOnline?'Supabase Conectado':'Sin conexión'}
         </span>
-        {sbAuthUser&&<span style={{fontSize:11,color:C.blue,background:C.blueLight,border:`1px solid ${C.blueBorder}`,borderRadius:20,padding:'4px 10px',fontWeight:700}}>🔐 Auth: {sbAuthUser.email?.split('@')[0]}</span>}
+
         <button onClick={loadActividad} style={{...S.btnOutline,padding:'6px 14px',fontSize:11,display:'flex',alignItems:'center',gap:5}}>🔄 Actualizar</button>
         <button onClick={backupSupabase} disabled={!sbOnline} style={{...S.btn,padding:'6px 14px',fontSize:11,display:'flex',alignItems:'center',gap:5,background:sbOnline?C.blue:C.textLight,cursor:sbOnline?'pointer':'not-allowed'}}>☁️ Backup Ahora</button>
         <button onClick={()=>loadSbBackups()} disabled={sbBackupsLoading} style={{...S.btn,padding:'6px 14px',fontSize:11,display:'flex',alignItems:'center',gap:5,background:C.teal,cursor:'pointer'}}>
