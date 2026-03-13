@@ -728,35 +728,67 @@ export default function App(){
     loadAll();
   },[]);// eslint-disable-line
 
-  /* ── SUPABASE: polling cada 3s + reconexión automática ── */
+  /* ── SUPABASE: sync inteligente — detecta cambios por updated_at ── */
   useEffect(()=>{
     let pollTimer;
+    let lastUpdated={};
     const POLL_KEYS=['aa_ventas','aa_products','aa_clientes','aa_abonos','aa_movimientos','aa_gastos','aa_folio'];
-    const applyData=(data)=>{
-      const m={};
-      data.forEach(r=>{m[r.key]=r.data;});
-      if(m['aa_ventas'])            setVentas(m['aa_ventas']);
-      if(m['aa_products'])          setProducts(m['aa_products']);
-      if(m['aa_clientes'])          setClientes(m['aa_clientes']);
-      if(m['aa_abonos'])            setAbonos(m['aa_abonos']);
-      if(m['aa_movimientos'])       setMovs(m['aa_movimientos']);
-      if(m['aa_gastos'])            setGastos(m['aa_gastos']);
-      if(m['aa_folio']!==undefined) setFolioNum(m['aa_folio']);
+    const SUPABASE_URL=import.meta.env.REACT_APP_SUPABASE_URL;
+    const SUPABASE_KEY=import.meta.env.REACT_APP_SUPABASE_ANON_KEY;
+
+    const fetchFresh=async(keys)=>{
+      const qs=keys.map(k=>`'${k}'`).join(',');
+      const res=await fetch(
+        `${SUPABASE_URL}/rest/v1/adornarte_store?key=in.(${qs})&select=key,data,updated_at`,
+        {cache:'no-store',headers:{
+          'apikey':SUPABASE_KEY,
+          'Authorization':`Bearer ${SUPABASE_KEY}`,
+        }}
+      );
+      if(!res.ok) return null;
+      return res.json();
     };
+
     const poll=async()=>{
       try{
-        /* Agregar timestamp como columna ficticia para evitar cache */
-        const {data,error}=await supabase
-          .from('adornarte_store')
-          .select('key,data,updated_at')
-          .in('key',POLL_KEYS);
-        if(error){setSbOnline(false);return;}
+        /* Paso 1: Verificar timestamps — muy liviano */
+        const res=await fetch(
+          `${SUPABASE_URL}/rest/v1/adornarte_store?key=in.(${POLL_KEYS.map(k=>`'${k}'`).join(',')})&select=key,updated_at`,
+          {cache:'no-store',headers:{
+            'apikey':SUPABASE_KEY,
+            'Authorization':`Bearer ${SUPABASE_KEY}`,
+          }}
+        );
+        if(!res.ok){setSbOnline(false);return;}
         setSbOnline(true);
-        if(data&&data.length>0) applyData(data);
+        const timestamps=await res.json();
+        
+        /* Paso 2: Detectar qué cambió */
+        const changedKeys=timestamps
+          .filter(r=>lastUpdated[r.key]!==r.updated_at)
+          .map(r=>r.key);
+        
+        if(changedKeys.length===0) return; /* Nada cambió */
+        
+        /* Paso 3: Solo cargar los que cambiaron */
+        const freshData=await fetchFresh(changedKeys);
+        if(!freshData) return;
+        
+        freshData.forEach(r=>{
+          lastUpdated[r.key]=r.updated_at;
+          if(r.key==='aa_ventas')      setVentas(r.data);
+          if(r.key==='aa_products')    setProducts(r.data);
+          if(r.key==='aa_clientes')    setClientes(r.data);
+          if(r.key==='aa_abonos')      setAbonos(r.data);
+          if(r.key==='aa_movimientos') setMovs(r.data);
+          if(r.key==='aa_gastos')      setGastos(r.data);
+          if(r.key==='aa_folio')       setFolioNum(r.data);
+        });
       }catch{setSbOnline(false);}
     };
+
     poll();
-    pollTimer=setInterval(poll,1000);
+    pollTimer=setInterval(poll,3000);
     const handleOnline=()=>poll();
     const handleVisibility=()=>{ if(document.visibilityState==='visible') poll(); };
     window.addEventListener('online',handleOnline);
