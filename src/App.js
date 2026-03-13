@@ -760,6 +760,9 @@ export default function App(){
       await checkOnline();
       /* Si está offline, intentar reconectar automáticamente */
     },30000);
+    /* Sincronizar al instante cuando el usuario regresa a la pestaña */
+    const handleVisibility=()=>{ if(document.visibilityState==='visible') pollData(); };
+    document.addEventListener('visibilitychange',handleVisibility);
     pollTimer=setInterval(async()=>{
       /* Si está offline, intentar reconectar solo */
       try{
@@ -779,11 +782,11 @@ export default function App(){
         if(m['aa_gastos'])      setGastos(m['aa_gastos']);
         if(m['aa_folio']!==undefined) setFolioNum(m['aa_folio']);
       }catch{setSbOnline(false);}
-    },5000);
+    },2000);
     /* Reintentar automáticamente cuando el navegador recupera internet */
     const handleOnline=()=>{ setSbOnline(null); checkOnline(); pollData(); };
     window.addEventListener('online',handleOnline);
-    return()=>{ clearInterval(timer); clearInterval(pollTimer); window.removeEventListener('online',handleOnline); };
+    return()=>{ clearInterval(timer); clearInterval(pollTimer); window.removeEventListener('online',handleOnline); document.removeEventListener('visibilitychange',handleVisibility); };
   },[]);// eslint-disable-line
 
   /* Reconectar manualmente y recargar datos desde Supabase */
