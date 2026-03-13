@@ -1,7 +1,7 @@
 import { createClient } from '@supabase/supabase-js';
 
-const SUPABASE_URL      = import.meta.env.REACT_APP_SUPABASE_URL      || '';
-const SUPABASE_ANON_KEY = import.meta.env.REACT_APP_SUPABASE_ANON_KEY || '';
+const SUPABASE_URL      = import.meta.env.VITE_SUPABASE_URL      || '';
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
 
 /* Si las variables de entorno están vacías, devuelve un stub offline para
    que la app nunca explote antes de llegar al login */
