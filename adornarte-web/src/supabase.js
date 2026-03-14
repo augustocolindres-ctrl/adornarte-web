@@ -1,9 +1,9 @@
-// v2
+// v3
 import { createClient } from '@supabase/supabase-js';
+
 const SUPABASE_URL      = 'https://zhqmjonrtzulfdiimiba.supabase.co';
-const SUPABASE_ANON_KEY = import.meta.env.eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpocW1qb25ydHp1bGZkaWltaWJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMjc5NjYsImV4cCI6MjA4ODcwMzk2Nn0.1QpbuL1Z4smfyEUNnTI9nSSIRXzPnPFD6sVCm2nYpSQ || '';
-/* Si las variables de entorno están vacías, devuelve un stub offline para
-   que la app nunca explote antes de llegar al login */
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpocW1qb25ydHp1bGZkaWltaWJhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzMxMjc5NjYsImV4cCI6MjA4ODcwMzk2Nn0.1QpbuL1Z4smfyEUNnTI9nSSIRXzPnPFD6sVCm2nYpSQ';
+
 let supabase;
 try {
   if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error('env missing');
