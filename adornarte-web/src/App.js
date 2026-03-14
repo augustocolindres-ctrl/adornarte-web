@@ -807,17 +807,17 @@ export default function App(){
         const {key,data}=payload.new||{};
         if(!key||data===undefined)return;
         switch(key){
-          case 'products':    setProducts(data);     break;
-          case 'clientes':    setClientes(data);     break;
-          case 'ventas':      setVentas(data);       break;
-          case 'movimientos': setMovs(data);         break;
-          case 'abonos':      setAbonos(data);       break;
-          case 'gastos':      setGastos(data);       break;
-          case 'catGastos':   setCatG(data);         break;
-          case 'proveedores': setProv(data);         break;
-          case 'cotizaciones':setCotiz(data);        break;
-          case 'devoluciones':setDevs(data);         break;
-          case 'config':      setConfig(c=>({...c,...data})); break;
+          case KEYS.products:    setProducts(data);     break;
+          case KEYS.clientes:    setClientes(data);     break;
+          case KEYS.ventas:      setVentas(data);       break;
+          case KEYS.movimientos: setMovs(data);         break;
+          case KEYS.abonos:      setAbonos(data);       break;
+          case KEYS.gastos:      setGastos(data);       break;
+          case KEYS.catGastos:   setCatG(data);         break;
+          case KEYS.proveedores: setProv(data);         break;
+          case KEYS.cotizaciones:setCotiz(data);        break;
+          case KEYS.devoluciones:setDevs(data);         break;
+          case KEYS.config:      setConfig(c=>({...c,...data})); break;
           default: break;
         }
       })
