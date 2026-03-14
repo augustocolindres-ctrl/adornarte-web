@@ -6,25 +6,9 @@ const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBh
 
 let supabase;
 try {
-  if (!SUPABASE_URL || !SUPABASE_ANON_KEY) throw new Error('env missing');
   supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 } catch(e) {
-  console.warn('Supabase no configurado — modo offline:', e.message);
-  const noop = () => Promise.resolve({ data: [], error: { message: 'offline' } });
-  const qb   = () => ({ select: noop, insert: noop, upsert: noop, update: noop,
-                         delete: noop, order: () => ({ limit: noop }), limit: noop });
-  supabase = {
-    from:          () => qb(),
-    channel:       () => ({ on(){ return this; }, subscribe(){ return this; } }),
-    removeChannel: () => {},
-    auth: {
-      getSession:         () => Promise.resolve({ data: { session: null } }),
-      onAuthStateChange:  () => ({ data: { subscription: { unsubscribe: ()=>{} } } }),
-      signInWithPassword: () => Promise.resolve({ error: { message: 'offline' } }),
-      signUp:             () => Promise.resolve({ error: { message: 'offline' } }),
-      signOut:            () => Promise.resolve({}),
-    },
-  };
+  console.warn('Error:', e.message);
 }
 
 export { supabase };
