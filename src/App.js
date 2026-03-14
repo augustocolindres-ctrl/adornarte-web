@@ -1,6 +1,32 @@
 import React,{useState,useMemo,useEffect,useRef,useCallback}from 'react';
 import logo from './logo.png';
 import { supabase } from './supabase';
+// Backup manual a Supabase
+const backupSupabase = async () => {
+  try {
+
+    const data = {
+      fecha: new Date().toISOString(),
+      tipo: "manual"
+    };
+
+    const { error } = await supabase
+      .from("backups")
+      .insert([data]);
+
+    if (error) {
+      console.error("Error creando backup:", error);
+      alert("Error al crear backup");
+      return;
+    }
+
+    alert("✅ Backup creado correctamente");
+
+  } catch (err) {
+    console.error("Backup error:", err);
+    alert("Error ejecutando backup");
+  }
+};
 
 /* ─── ROLES ──────────────────────────────────────────────── */
 const ROLES={admin:'Administrador',supervisor:'Supervisor',cajero:'Cajero'};
