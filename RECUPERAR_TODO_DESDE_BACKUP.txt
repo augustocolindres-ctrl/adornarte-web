@@ -1,0 +1,14 @@
+PASOS RECOMENDADOS
+
+1. Inicia sesión en la app nueva.
+2. En la app, usa Importar respaldo (.json) y selecciona AdornArte-Backup-full-transformado.json.
+3. Espera a que aparezca el mensaje de respaldo restaurado.
+4. No recargues hasta que termine de mostrarse inventario/ventas/clientes.
+5. Después crea un Backup Supabase nuevo desde la app.
+
+NOTAS
+- Este backup ya viene adaptado a la versión actual.
+- No borra imágenes de productos.
+- Los productos se guardan localmente en IndexedDB para evitar conflictos de tamaño.
+- El archivo SQL restore_store_sin_productos.sql sirve solo para meter clientes/ventas/config/etc. directo a Supabase si lo necesitas.
+- Los productos NO se importan por SQL para evitar timeouts; se restauran desde el JSON en la app.
