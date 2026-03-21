@@ -787,6 +787,7 @@ export default function App(){
   const [viewportW,setViewportW]=useState(()=>window.innerWidth||1280);
   const isMobile=viewportW<900;
   const [mobileMenuOpen,setMobileMenuOpen]=useState(false);
+  const [mobileBottomHidden,setMobileBottomHidden]=useState(false);
 
 
   /* ── forms ── */
@@ -812,6 +813,18 @@ export default function App(){
     return()=>window.removeEventListener('resize',onResize);
   },[]);
   useEffect(()=>{ if(!isMobile) setMobileMenuOpen(false); },[isMobile]);
+  useEffect(()=>{
+    if(!isMobile){ setMobileBottomHidden(false); return; }
+    let last=window.scrollY||0;
+    const onScroll=()=>{
+      const y=window.scrollY||0;
+      if(y>last+10 && y>120) setMobileBottomHidden(true);
+      else if(y<last-10 || y<80) setMobileBottomHidden(false);
+      last=y;
+    };
+    window.addEventListener('scroll',onScroll,{passive:true});
+    return()=>window.removeEventListener('scroll',onScroll);
+  },[isMobile]);
 
   /* ── admin auth for delete ── */
   const [pendDel,setPendDel]=useState(null);
@@ -849,17 +862,6 @@ export default function App(){
   useEffect(()=>{
     setCameraSupported(typeof navigator!=='undefined' && !!navigator.mediaDevices?.getUserMedia);
   },[]);
-
-  function findByBarcode(code){
-    const t=String(code||'').trim();
-    if(!t) return null;
-    const p=safeList(products).find(x=>String(x?.codigoBarras||'').trim()===t);
-    if(p){
-      try{ showToast(`📦 ${p.nombre} — ${fmt(p.precio)}`,C.blue); }catch{}
-      return p;
-    }
-    return null;
-  }
 
   const stopCameraScan=useCallback(()=>{
     try{ if(cameraLoopRef.current) cancelAnimationFrame(cameraLoopRef.current); }catch{}
@@ -1556,7 +1558,14 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
     if(file.size>800000){showToast('Imagen muy grande (máx 800KB)',C.red);return;}
     const r=new FileReader();r.onload=ev=>setPForm(f=>({...f,foto:ev.target.result}));r.readAsDataURL(file);
   };
+
   /* ── BARCODE ── */
+  const findByBarcode=code=>{
+    const t=code.trim();
+    const p=safeList(products).find(x=>x.codigoBarras===t);
+    if(p){showToast(`📦 ${p.nombre} — ${fmt(p.precio)}`,C.blue);return p;}
+    showToast(`Código "${t}" no encontrado ❌`,C.amber);return null;
+  };
 
   /* ── POS computed ── */
   const posSubtotalBruto=useMemo(()=>posItems.reduce((a,i)=>a+i.precio*i.cantidad,0),[posItems]);
@@ -1584,7 +1593,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   },[cotItems,cotDesc,cotDescTipo,cotSubtotal]);
   const cotTotal=useMemo(()=>cotSubtotal-cotDescMonto,[cotSubtotal,cotDescMonto]);
 
-  function posAddProduct(prod,varianteId=null){
+  const posAddProduct=(prod,varianteId=null)=>{
     /* si tiene variantes y no se eligió una, abrir picker */
     if((prod.variantes||[]).length>0&&varianteId===null){
       setPosVariantProd(prod);setModal('variantPicker');return;
@@ -1602,7 +1611,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
     const ex=posItems.find(i=>i.itemKey===itemKey);
     if(ex){setPosItems(its=>its.map(i=>i.itemKey===itemKey?{...i,cantidad:i.cantidad+1,subtotal:(i.cantidad+1)*i.precio}:i));}
     else{setPosItems(its=>[...its,{itemKey,productoId:prod.id,varianteId:varianteId??null,varianteNombre:variante?.nombre||null,productoNombre:nomCompleto,cantidad:1,precio:precioFinal,precioOrig:precioFinal,costo:prod.costo,subtotal:precioFinal,esEspecial:!!pesp}]);}
-  }
+  };
   const posChangeQty=(itemKey,delta)=>{
     const it=posItems.find(i=>i.itemKey===itemKey);if(!it)return;
     const prod=safeList(products).find(p=>p.id===it.productoId);
@@ -3286,12 +3295,12 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
             </button>
           </div>
         </div>
-        <nav style={{padding:'10px 8px 14px',flex:1,overflowY:'auto'}}>
+        <nav style={{padding:'8px 6px',flex:1,overflowY:'auto'}}>
           {TABS.map(t=>{
             const active=tab===t.id;
             const hasBadge=t.id==='Inventario'&&alertasStock.length>0;
-            return<button key={t.id} onClick={()=>{setTab(t.id);setSearch(''); if(isMobile)setMobileMenuOpen(false);}} style={{width:'100%',display:'flex',alignItems:'center',gap:9,padding:'9px 10px',minHeight:42,borderRadius:10,border:'none',cursor:'pointer',marginBottom:4,background:active?C.pinkLight:'transparent',color:active?C.pink:C.textMid,fontWeight:active?800:600,fontSize:12.5,boxShadow:active?'0 1px 0 rgba(232,65,122,0.05)':'none'}}>
-              <span style={{fontSize:14,width:18,textAlign:'center',flexShrink:0}}>{t.icon}</span><span style={{lineHeight:1.15}}>{t.label}</span>
+            return<button key={t.id} onClick={()=>{setTab(t.id);setSearch(''); if(isMobile)setMobileMenuOpen(false);}} style={{width:'100%',display:'flex',alignItems:'center',gap:7,padding:'7px 8px',borderRadius:8,border:'none',cursor:'pointer',marginBottom:1,background:active?C.pinkLight:'transparent',color:active?C.pink:C.textMid,fontWeight:active?700:500,fontSize:12.5}}>
+              <span style={{fontSize:13,width:17,textAlign:'center'}}>{t.icon}</span>{t.label}
               {hasBadge&&<span style={{marginLeft:'auto',background:C.red,color:'#fff',borderRadius:999,fontSize:9,fontWeight:800,padding:'1px 5px'}}>{alertasStock.length}</span>}
               {active&&!hasBadge&&<span style={{marginLeft:'auto',width:5,height:5,borderRadius:'50%',background:C.pink}}/>}
             </button>;
@@ -3313,10 +3322,10 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       </aside>
 
       {/* ── MAIN ── */}
-      <div style={isMobile?{...S.main,marginLeft:0,paddingTop:'env(safe-area-inset-top, 0px)'}:{...S.main}}>
-        <div style={isMobile?{...S.topbar,padding:'10px 12px',top:'env(safe-area-inset-top, 0px)'}:S.topbar}>
+      <div style={isMobile?{...S.main,marginLeft:0}:{...S.main}}>
+        <div style={isMobile?{...S.topbar,padding:'12px 14px'}:S.topbar}>
           <div style={{display:'flex',alignItems:'center',gap:10}}>{isMobile&&<button onClick={()=>setMobileMenuOpen(true)} style={{background:C.pinkLight,border:`1px solid ${C.border}`,color:C.pink,borderRadius:10,width:36,height:36,cursor:'pointer',fontSize:18,flexShrink:0}}>☰</button>}<div><div style={{fontSize:17,fontWeight:800,color:C.text}}>{tabInfo.icon} {tabInfo.label}</div><div style={{fontSize:10,color:C.textLight,marginTop:1}}>{new Date().toLocaleDateString('es-HN',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div></div>
-          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:isMobile?'wrap':'nowrap',justifyContent:'flex-end'}}>
+          <div style={{display:'flex',gap:8,alignItems:'center'}}>
             {alertasStock.length>0&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:7,padding:'4px 10px',fontSize:10,color:C.red,fontWeight:700}}>⚠️ {alertasStock.length} bajo</div>}
             <div style={{background:C.pinkLight,borderRadius:9,padding:'5px 12px',fontSize:11,color:C.pink,fontWeight:700}}>🌸 {config.nombre}</div>
           </div>
@@ -3348,7 +3357,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         )}
         {showNotifs&&<div onClick={()=>setShowNotifs(false)} style={{position:'fixed',inset:0,zIndex:199}}/>}
 
-        <div style={isMobile?{...S.content,padding:'12px 10px 116px',maxWidth:'100vw',overflowX:'hidden'}:S.content}>
+        <div style={isMobile?{...S.content,padding:'14px 12px 118px'}:S.content}>
 
         {/* ── Notificaciones de cumpleaños ── */}
         {cumpleNotis.filter(c=>!cumpleDismissed.includes(c.id)).map(c=>(
@@ -3698,61 +3707,104 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 {/* ════════════════ INVENTARIO ════════════════ */}
 {tab==='Inventario'&&(
   <div>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:13}}>
-      <div style={{display:'flex',alignItems:'center',gap:8}}>
-        <p style={{color:C.textMid,fontSize:12}}>{products.length} productos · Valor: <strong style={{color:C.pink}}>{fmt(products.reduce((a,p)=>a+p.precio*p.stock,0))}</strong></p>
-        {/* Filtro stock bajo */}
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:isMobile?'stretch':'center',flexDirection:isMobile?'column':'row',gap:10,marginBottom:12}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+        <p style={{color:C.textMid,fontSize:12}}>{products.length} productos · Valor: <strong style={{color:C.pink}}>{fmt(products.reduce((a,p)=>a+p.precio*stockTotal(p),0))}</strong></p>
         <button
           onClick={()=>setSearch(s=>s==='__STOCKBAJO__'?'':'__STOCKBAJO__')}
           style={{display:'flex',alignItems:'center',gap:5,padding:'5px 11px',borderRadius:8,border:`2px solid ${search==='__STOCKBAJO__'?C.red:C.border}`,background:search==='__STOCKBAJO__'?C.redLight:'transparent',color:search==='__STOCKBAJO__'?C.red:C.textMid,fontWeight:search==='__STOCKBAJO__'?700:500,fontSize:11,cursor:'pointer',whiteSpace:'nowrap'}}>
           ⚠️ Stock Bajo {alertasStock.length>0&&<span style={{background:search==='__STOCKBAJO__'?C.red:'#fca5a5',color:'#fff',borderRadius:999,fontSize:9,fontWeight:800,padding:'1px 5px'}}>{alertasStock.length}</span>}
         </button>
       </div>
-      <div style={{display:'flex',gap:7}}>
+      <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>
         <button style={{...S.btnSm,fontSize:11,background:C.purpleLight,color:C.purple}} onClick={()=>setModal('etiquetas')}>🏷️ Etiquetas</button>
         <button style={{...S.btnGreen,fontSize:12}} onClick={()=>setCsvImportModal(true)}>📥 Importar CSV</button>
         <button style={S.btn} onClick={openAddP}>+ Nuevo Producto</button>
       </div>
     </div>
-    <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
-      <div style={{position:'relative',flex:1}}>
+    <div style={{display:'flex',gap:8,marginBottom:12,alignItems:isMobile?'stretch':'center',flexDirection:isMobile?'column':'row'}}>
+      <div style={{position:'relative',flex:1,width:isMobile?'100%':'auto'}}>
         <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight,fontSize:12}}>🔍</span>
         <input style={S.searchBar} value={search==='__STOCKBAJO__'?'':search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por nombre, categoría o código..."/>
         {search==='__STOCKBAJO__'&&<span style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',fontSize:11,color:C.red,fontWeight:700,pointerEvents:'none'}}>⚠️ Filtrando stock bajo</span>}
       </div>
-      <div style={{display:'flex',alignItems:'center',gap:5,flexShrink:0}}>
+      <div style={{display:'flex',alignItems:'center',gap:5,flexShrink:0,flexWrap:'wrap',width:isMobile?'100%':'auto'}}>
         <span style={{fontSize:11,color:C.textMid,whiteSpace:'nowrap'}}>Ordenar:</span>
         {[['','Por defecto'],['categoria','Categoría'],['nombre','Nombre'],['precio','Precio ↓'],['stock','Stock ↓']].map(([v,l])=>(
           <button key={v} onClick={()=>setInvSort(v)} style={{...S.btnSm,fontSize:10,background:invSort===v?C.purple:C.purpleLight,color:invSort===v?'#fff':C.purple,padding:'4px 9px'}}>{l}</button>
         ))}
       </div>
     </div>
-    <div style={S.card}><table style={S.table}><thead><tr>{['','Producto','Código','Cat.','Proveedor','Stock','Precio','Costo','Margen','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
-    <tbody>{fp.map(p=>{
-      const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
-      const low=p.stockMinimo>0&&p.stock<=p.stockMinimo;
-      const prov=proveedoresSafe.find(x=>x.id===p.proveedorId);
-      return<tr key={p.id} style={{background:low?'rgba(220,38,38,0.02)':''}} onMouseEnter={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.05)':'#faf9fb'} onMouseLeave={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.02)':''}>
-        <td style={{...S.td,width:38,padding:'6px 5px'}}>{p.foto?<img src={p.foto} alt="" style={{width:32,height:32,borderRadius:7,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:32,height:32,borderRadius:7,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🏷️</div>}</td>
-        <td style={{...S.td,fontWeight:700,fontSize:12}}>{p.nombre}{low&&<span style={{marginLeft:5,fontSize:9,background:C.redLight,color:C.red,borderRadius:5,padding:'1px 4px',fontWeight:700}}>⚠️</span>}</td>
-        <td style={{...S.td,fontSize:10,color:C.textLight,fontFamily:'monospace'}}>{p.codigoBarras||'—'}</td>
-        <td style={S.td}><Badge text={p.categoria||'—'} color={C.purple} bg={C.purpleLight}/></td>
-        <td style={{...S.td,fontSize:11,color:C.textMid}}>{prov?.nombre||'—'}</td>
-        <td style={S.td}>
-          <Badge text={stockTotal(p)} color={stockTotal(p)<=(p.stockMinimo||0)?C.red:stockTotal(p)<20?C.amber:C.green} bg={stockTotal(p)<=(p.stockMinimo||0)?C.redLight:stockTotal(p)<20?C.amberLight:C.greenLight}/>
-          {(p.variantes||[]).length>0&&<span style={{marginLeft:5,fontSize:9,background:C.purpleLight,color:C.purple,borderRadius:4,padding:'1px 5px',fontWeight:700}}>VAR {p.variantes.length}</span>}
-        </td>
-        <td style={{...S.td,fontWeight:700,color:C.pink}}>{fmt(p.precio)}</td>
-        <td style={{...S.td,color:C.textMid,fontSize:12}}>{fmt(p.costo)}</td>
-        <td style={{...S.td,fontWeight:700,color:C.green,fontSize:12}}>{mg}%</td>
-        <td style={S.td}>
-          <IBtn icon="📦" title="Ingresar stock" color={C.green} bg={C.greenLight} onClick={()=>openIngresoRapido(p)}/>
-          <IBtn icon="📈" title="Historial de precios" color={C.amber} bg={C.amberLight} onClick={()=>{setEdit(p);setModal('historialPrecios');}}/>
-          <IBtn icon="✏️" onClick={()=>openEditP(p)}/>
-          <IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>delP(p.id)}/>
-        </td>
-      </tr>;
-    })}{fp.length===0&&<tr><td colSpan={10} style={{...S.td,textAlign:'center',color:C.textLight,padding:'22px'}}>Sin productos</td></tr>}</tbody></table></div>
+    {isMobile?(
+      <div style={{display:'grid',gap:10,paddingBottom:12}}>
+        {fp.map(p=>{
+          const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
+          const low=stockTotal(p)<=(p.stockMinimo||0);
+          const prov=proveedoresSafe.find(x=>x.id===p.proveedorId);
+          return(
+            <div key={p.id} style={{...S.card,padding:'12px',border:low?`1px solid ${C.redBorder}`:`1px solid ${C.cardBorder}`}}>
+              <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
+                {p.foto?<img src={p.foto} alt="" style={{width:56,height:56,borderRadius:10,objectFit:'cover',border:`1px solid ${C.border}`,flexShrink:0}}/>:<div style={{width:56,height:56,borderRadius:10,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,flexShrink:0}}>🏷️</div>}
+                <div style={{flex:1,minWidth:0}}>
+                  <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                    <div style={{fontWeight:800,fontSize:14,color:C.text,lineHeight:1.2}}>{p.nombre}</div>
+                    {low&&<span style={{fontSize:10,background:C.redLight,color:C.red,borderRadius:6,padding:'2px 6px',fontWeight:800}}>⚠️ Stock bajo</span>}
+                  </div>
+                  <div style={{fontSize:11,color:C.textLight,marginTop:3,fontFamily:'monospace',wordBreak:'break-all'}}>{p.codigoBarras||'Sin código'}</div>
+                  <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:7}}>
+                    <Badge text={p.categoria||'—'} color={C.purple} bg={C.purpleLight}/>
+                    <Badge text={`Stock ${stockTotal(p)}`} color={stockTotal(p)<=(p.stockMinimo||0)?C.red:stockTotal(p)<20?C.amber:C.green} bg={stockTotal(p)<=(p.stockMinimo||0)?C.redLight:stockTotal(p)<20?C.amberLight:C.greenLight}/>
+                    {(p.variantes||[]).length>0&&<Badge text={`VAR ${p.variantes.length}`} color={C.purple} bg={C.purpleLight}/>}
+                  </div>
+                  <div style={{display:'grid',gridTemplateColumns:'repeat(3,minmax(0,1fr))',gap:8,marginTop:9}}>
+                    <div><div style={{fontSize:10,color:C.textLight}}>Precio</div><div style={{fontWeight:800,color:C.pink,fontSize:13}}>{fmt(p.precio)}</div></div>
+                    <div><div style={{fontSize:10,color:C.textLight}}>Costo</div><div style={{fontWeight:700,color:C.text,fontSize:12}}>{fmt(p.costo)}</div></div>
+                    <div><div style={{fontSize:10,color:C.textLight}}>Margen</div><div style={{fontWeight:800,color:C.green,fontSize:12}}>{mg}%</div></div>
+                  </div>
+                  <div style={{fontSize:11,color:C.textMid,marginTop:6}}>Proveedor: {prov?.nombre||'—'}</div>
+                </div>
+              </div>
+              <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:8,marginTop:10}}>
+                <button style={{...S.btnSm,padding:'8px 4px',fontSize:11}} onClick={()=>openIngresoRapido(p)}>➕ Stock</button>
+                <button style={{...S.btnSm,padding:'8px 4px',fontSize:11,background:C.amberLight,color:C.amber}} onClick={()=>{setEdit(p);setModal('historialPrecios');}}>📈 Hist.</button>
+                <button style={{...S.btnSm,padding:'8px 4px',fontSize:11,background:C.blueLight,color:C.blue}} onClick={()=>openEditP(p)}>✏️ Editar</button>
+                <button style={{...S.btnSm,padding:'8px 4px',fontSize:11,background:C.redLight,color:C.red}} onClick={()=>delP(p.id)}>🗑️ Borrar</button>
+              </div>
+            </div>
+          );
+        })}
+        {fp.length===0&&<div style={{...S.card,padding:'20px',textAlign:'center',color:C.textLight}}>Sin productos</div>}
+      </div>
+    ):(
+      <div style={{...S.card,overflowX:'auto'}}>
+        <table style={{...S.table,minWidth:900}}><thead><tr>{['','Producto','Código','Cat.','Proveedor','Stock','Precio','Costo','Margen','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+        <tbody>{fp.map(p=>{
+          const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
+          const low=p.stockMinimo>0&&p.stock<=p.stockMinimo;
+          const prov=proveedoresSafe.find(x=>x.id===p.proveedorId);
+          return<tr key={p.id} style={{background:low?'rgba(220,38,38,0.02)':''}} onMouseEnter={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.05)':'#faf9fb'} onMouseLeave={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.02)':''}>
+            <td style={{...S.td,width:38,padding:'6px 5px'}}>{p.foto?<img src={p.foto} alt="" style={{width:32,height:32,borderRadius:7,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:32,height:32,borderRadius:7,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🏷️</div>}</td>
+            <td style={{...S.td,fontWeight:700,fontSize:12}}>{p.nombre}{low&&<span style={{marginLeft:5,fontSize:9,background:C.redLight,color:C.red,borderRadius:5,padding:'1px 4px',fontWeight:700}}>⚠️</span>}</td>
+            <td style={{...S.td,fontSize:10,color:C.textLight,fontFamily:'monospace'}}>{p.codigoBarras||'—'}</td>
+            <td style={S.td}><Badge text={p.categoria||'—'} color={C.purple} bg={C.purpleLight}/></td>
+            <td style={{...S.td,fontSize:11,color:C.textMid}}>{prov?.nombre||'—'}</td>
+            <td style={S.td}>
+              <Badge text={stockTotal(p)} color={stockTotal(p)<=(p.stockMinimo||0)?C.red:stockTotal(p)<20?C.amber:C.green} bg={stockTotal(p)<=(p.stockMinimo||0)?C.redLight:stockTotal(p)<20?C.amberLight:C.greenLight}/>
+              {(p.variantes||[]).length>0&&<span style={{marginLeft:5,fontSize:9,background:C.purpleLight,color:C.purple,borderRadius:4,padding:'1px 5px',fontWeight:700}}>VAR {p.variantes.length}</span>}
+            </td>
+            <td style={{...S.td,fontWeight:700,color:C.pink}}>{fmt(p.precio)}</td>
+            <td style={{...S.td,color:C.textMid,fontSize:12}}>{fmt(p.costo)}</td>
+            <td style={{...S.td,fontWeight:700,color:C.green,fontSize:12}}>{mg}%</td>
+            <td style={S.td}>
+              <IBtn icon="📦" title="Ingresar stock" color={C.green} bg={C.greenLight} onClick={()=>openIngresoRapido(p)}/>
+              <IBtn icon="📈" title="Historial de precios" color={C.amber} bg={C.amberLight} onClick={()=>{setEdit(p);setModal('historialPrecios');}}/>
+              <IBtn icon="✏️" onClick={()=>openEditP(p)}/>
+              <IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>delP(p.id)}/>
+            </td>
+          </tr>;
+        })}{fp.length===0&&<tr><td colSpan={10} style={{...S.td,textAlign:'center',color:C.textLight,padding:'22px'}}>Sin productos</td></tr>}</tbody></table>
+      </div>
+    )}
   </div>
 )}
 
