@@ -603,7 +603,7 @@ const openPDF=(html,filename='AdornArte.pdf')=>{
       <button onclick="window.print()" style="margin-left:auto;background:#fff;color:#1e40af;border:none;border-radius:6px;padding:7px 20px;font-weight:700;font-size:13px;cursor:pointer">🖨️ Guardar PDF / Imprimir</button>
       <button onclick="window.close()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);border-radius:6px;padding:7px 14px;font-size:12px;cursor:pointer">✕ Cerrar</button>
     </div>
-    <div style="height:isMobile?42:52px"></div>${html.replace(/^<!DOCTYPE[^>]*>.*?<body[^>]*>/si,'').replace(/<\/body>.*$/si,'')}</body></html>`);
+    <div style="height:52px"></div>${html.replace(/^<!DOCTYPE[^>]*>.*?<body[^>]*>/si,'').replace(/<\/body>.*$/si,'')}</body></html>`);
   pw.document.close();pw.focus();
 };
 const pdfBase=(titulo,subtitulo,tableHead,tableBody,totalesRows='',cfg={})=>{
@@ -842,40 +842,12 @@ export default function App(){
   const [cameraSupported,setCameraSupported]=useState(false);
   const [cameraScanMsg,setCameraScanMsg]=useState('');
   const [cameraManual,setCameraManual]=useState('');
-  const [cameraScanTarget,setCameraScanTarget]=useState('pos');
-  const [cameraUsingHtml5,setCameraUsingHtml5]=useState(false);
   const cameraVideoRef=useRef(null);
   const cameraStreamRef=useRef(null);
   const cameraLoopRef=useRef(null);
-  const cameraHtml5Ref=useRef(null);
-  const cameraRegionId='aa-camera-region';
 
   useEffect(()=>{
     setCameraSupported(typeof navigator!=='undefined' && !!navigator.mediaDevices?.getUserMedia);
-  },[]);
-
-  const ensureHtml5QrLib=useCallback(async()=>{
-    if(typeof window==='undefined') return false;
-    if(window.Html5Qrcode) return true;
-    const existing=document.querySelector('script[data-aa-html5qrcode="1"]');
-    if(existing){
-      await new Promise(resolve=>{
-        if(window.Html5Qrcode) return resolve();
-        existing.addEventListener('load',()=>resolve(),{once:true});
-        existing.addEventListener('error',()=>resolve(),{once:true});
-      });
-      return !!window.Html5Qrcode;
-    }
-    const script=document.createElement('script');
-    script.src='https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';
-    script.async=true;
-    script.dataset.aaHtml5qrcode='1';
-    document.body.appendChild(script);
-    await new Promise(resolve=>{
-      script.addEventListener('load',()=>resolve(),{once:true});
-      script.addEventListener('error',()=>resolve(),{once:true});
-    });
-    return !!window.Html5Qrcode;
   },[]);
 
   function findByBarcode(code){
@@ -889,74 +861,37 @@ export default function App(){
     return null;
   }
 
-  const stopCameraScan=useCallback(async()=>{
+  const stopCameraScan=useCallback(()=>{
     try{ if(cameraLoopRef.current) cancelAnimationFrame(cameraLoopRef.current); }catch{}
     cameraLoopRef.current=null;
-    try{
-      if(cameraHtml5Ref.current){
-        const ref=cameraHtml5Ref.current;
-        cameraHtml5Ref.current=null;
-        try{ await ref.stop(); }catch{}
-        try{ await ref.clear(); }catch{}
-      }
-    }catch{}
     try{ cameraStreamRef.current?.getTracks?.().forEach(t=>t.stop()); }catch{}
     cameraStreamRef.current=null;
-    setCameraUsingHtml5(false);
     setCameraScanOpen(false);
   },[]);
 
   const applyScannedCode=useCallback((rawCode)=>{
     const code=String(rawCode||'').trim();
     if(!code) return false;
-    if(cameraScanTarget==='product'){
-      setPForm(f=>({...f,codigoBarras:code}));
-      setCameraManual('');
-      setCameraScanMsg(`Código detectado: ${code}`);
-      setTimeout(()=>{ void stopCameraScan(); },180);
-      return true;
-    }
     const p=findByBarcode(code) || safeList(products).find(x=>(x.codigoBarras||'').trim()===code);
     if(p){
       posAddProduct(p);
       setPosBarcode('');
       setCameraManual('');
       setCameraScanMsg(`Producto detectado: ${p.nombre}`);
-      setTimeout(()=>{ void stopCameraScan(); },180);
+      setTimeout(()=>stopCameraScan(),180);
       return true;
     }
     setCameraScanMsg(`No se encontró el código: ${code}`);
     return false;
-  },[cameraScanTarget, findByBarcode, products, posAddProduct, stopCameraScan]);
+  },[findByBarcode, products, posAddProduct, stopCameraScan]);
 
-  const startCameraScan=useCallback(async(target='pos')=>{
-    setCameraScanTarget(target);
+  const startCameraScan=useCallback(async()=>{
     setCameraScanMsg('');
     setCameraManual('');
     setCameraScanOpen(true);
-    setCameraUsingHtml5(false);
     if(!(typeof navigator!=='undefined' && navigator.mediaDevices?.getUserMedia)){
       setCameraScanMsg('Tu navegador no permite cámara. Usa el campo manual.');
       return;
-    }
-    const html5Ok=await ensureHtml5QrLib();
-    if(html5Ok && typeof window!=='undefined' && window.Html5Qrcode){
-      try{
-        const scanner=new window.Html5Qrcode(cameraRegionId);
-        cameraHtml5Ref.current=scanner;
-        setCameraUsingHtml5(true);
-        await scanner.start(
-          { facingMode: 'environment' },
-          { fps: 10, qrbox: { width: 220, height: 120 }, aspectRatio: 1.777 },
-          (decodedText)=>{ applyScannedCode(decodedText); },
-          ()=>{}
-        );
-        setCameraScanMsg(target==='product'?'Escaneando código del producto...':'Escaneando producto...');
-        return;
-      }catch(e){
-        console.error('Html5Qrcode:',e);
-        setCameraUsingHtml5(false);
-      }
     }
     try{
       const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
@@ -967,7 +902,7 @@ export default function App(){
       }
       const BD=typeof window!=='undefined' ? window.BarcodeDetector : undefined;
       if(!BD){
-        setCameraScanMsg('Escaneo automático no disponible aquí. Usa el campo manual.');
+        setCameraScanMsg('Escaneo automático no disponible aquí. Usa el campo manual o el lector físico.');
         return;
       }
       const detector=new BD({formats:['code_128','ean_13','ean_8','upc_a','upc_e','qr_code']});
@@ -981,11 +916,10 @@ export default function App(){
         cameraLoopRef.current=requestAnimationFrame(tick);
       };
       cameraLoopRef.current=requestAnimationFrame(tick);
-      setCameraScanMsg('Alinea el código frente a la cámara.');
     }catch(e){
-      setCameraScanMsg('No se pudo abrir la cámara. Revisa permisos o usa el campo manual.');
+      setCameraScanMsg('No se pudo abrir la cámara. Revisa permisos.');
     }
-  },[applyScannedCode, cameraScanOpen, ensureHtml5QrLib]);
+  },[applyScannedCode, cameraScanOpen]);
 
   /* ── Cumpleaños notificaciones ── */
   const [cumpleNotis, setCumpleNotis] = useState([]);
@@ -3331,7 +3265,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         <div style={{padding:'14px 12px 10px',borderBottom:`1px solid ${C.border}`}}>
           <div style={{display:'flex',alignItems:'center',gap:8}}>
             <img src={logo} alt="" style={{width:38,height:38,borderRadius:8,objectFit:'contain',border:`2px solid ${C.pinkLight}`,background:'#fff'}}/>
-            <div><div style={{fontWeight:800,fontSize:isMobile?12:13,color:C.pink,fontFamily:'Georgia,serif'}}>AdornArte</div><div style={{fontSize:7,color:C.textLight,letterSpacing:'2px'}}>RESALTA TU BELLEZA</div></div>
+            <div><div style={{fontWeight:800,fontSize:13,color:C.pink,fontFamily:'Georgia,serif'}}>AdornArte</div><div style={{fontSize:7,color:C.textLight,letterSpacing:'2px'}}>RESALTA TU BELLEZA</div></div>
           </div>
           {/* Session info */}
           <div style={{marginTop:8,padding:'6px 9px',background:C.pinkLight,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
@@ -3352,12 +3286,12 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
             </button>
           </div>
         </div>
-        <nav style={{padding:'8px 6px',flex:1,overflowY:'auto'}}>
+        <nav style={{padding:'10px 8px 14px',flex:1,overflowY:'auto'}}>
           {TABS.map(t=>{
             const active=tab===t.id;
             const hasBadge=t.id==='Inventario'&&alertasStock.length>0;
-            return<button key={t.id} onClick={()=>{setTab(t.id);setSearch(''); if(isMobile)setMobileMenuOpen(false);}} style={{width:'100%',display:'flex',alignItems:'center',gap:7,padding:'7px 8px',borderRadius:8,border:'none',cursor:'pointer',marginBottom:1,background:active?C.pinkLight:'transparent',color:active?C.pink:C.textMid,fontWeight:active?700:500,fontSize:12.5}}>
-              <span style={{fontSize:13,width:17,textAlign:'center'}}>{t.icon}</span>{t.label}
+            return<button key={t.id} onClick={()=>{setTab(t.id);setSearch(''); if(isMobile)setMobileMenuOpen(false);}} style={{width:'100%',display:'flex',alignItems:'center',gap:9,padding:'9px 10px',minHeight:42,borderRadius:10,border:'none',cursor:'pointer',marginBottom:4,background:active?C.pinkLight:'transparent',color:active?C.pink:C.textMid,fontWeight:active?800:600,fontSize:12.5,boxShadow:active?'0 1px 0 rgba(232,65,122,0.05)':'none'}}>
+              <span style={{fontSize:14,width:18,textAlign:'center',flexShrink:0}}>{t.icon}</span><span style={{lineHeight:1.15}}>{t.label}</span>
               {hasBadge&&<span style={{marginLeft:'auto',background:C.red,color:'#fff',borderRadius:999,fontSize:9,fontWeight:800,padding:'1px 5px'}}>{alertasStock.length}</span>}
               {active&&!hasBadge&&<span style={{marginLeft:'auto',width:5,height:5,borderRadius:'50%',background:C.pink}}/>}
             </button>;
@@ -3379,10 +3313,10 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       </aside>
 
       {/* ── MAIN ── */}
-      <div style={isMobile?{...S.main,marginLeft:0}:{...S.main}}>
-        <div style={isMobile?{...S.topbar,padding:'12px 14px'}:S.topbar}>
+      <div style={isMobile?{...S.main,marginLeft:0,paddingTop:'env(safe-area-inset-top, 0px)'}:{...S.main}}>
+        <div style={isMobile?{...S.topbar,padding:'10px 12px',top:'env(safe-area-inset-top, 0px)'}:S.topbar}>
           <div style={{display:'flex',alignItems:'center',gap:10}}>{isMobile&&<button onClick={()=>setMobileMenuOpen(true)} style={{background:C.pinkLight,border:`1px solid ${C.border}`,color:C.pink,borderRadius:10,width:36,height:36,cursor:'pointer',fontSize:18,flexShrink:0}}>☰</button>}<div><div style={{fontSize:17,fontWeight:800,color:C.text}}>{tabInfo.icon} {tabInfo.label}</div><div style={{fontSize:10,color:C.textLight,marginTop:1}}>{new Date().toLocaleDateString('es-HN',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div></div>
-          <div style={{display:'flex',gap:8,alignItems:'center'}}>
+          <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:isMobile?'wrap':'nowrap',justifyContent:'flex-end'}}>
             {alertasStock.length>0&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:7,padding:'4px 10px',fontSize:10,color:C.red,fontWeight:700}}>⚠️ {alertasStock.length} bajo</div>}
             <div style={{background:C.pinkLight,borderRadius:9,padding:'5px 12px',fontSize:11,color:C.pink,fontWeight:700}}>🌸 {config.nombre}</div>
           </div>
@@ -3414,7 +3348,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         )}
         {showNotifs&&<div onClick={()=>setShowNotifs(false)} style={{position:'fixed',inset:0,zIndex:199}}/>}
 
-        <div style={isMobile?{...S.content,padding:'14px 12px 84px'}:S.content}>
+        <div style={isMobile?{...S.content,padding:'12px 10px 116px',maxWidth:'100vw',overflowX:'hidden'}:S.content}>
 
         {/* ── Notificaciones de cumpleaños ── */}
         {cumpleNotis.filter(c=>!cumpleDismissed.includes(c.id)).map(c=>(
@@ -3453,7 +3387,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
               onKeyDown={e=>{if(e.key==='Enter'&&posBarcode.trim()){const p=findByBarcode(posBarcode);if(p)posAddProduct(p);setPosBarcode('');posBarRef.current?.focus();}}}
               placeholder="Escanear barras" style={{...S.input,width:isMobile?'100%':180,marginBottom:0,fontFamily:'monospace',paddingLeft:28,background:'#f0f9ff',borderColor:'#bfdbfe'}}/>
           </div>
-          <button onClick={()=>startCameraScan('pos')} style={{...S.btnOutline,padding:'0 12px',fontSize:12,minWidth:isMobile?98:92,whiteSpace:'nowrap'}}>📷 Cámara</button>
+          <button onClick={startCameraScan} style={{...S.btnOutline,padding:'0 12px',fontSize:12,minWidth:isMobile?98:92,whiteSpace:'nowrap'}}>📷 Cámara</button>
         </div>
       </div>
       {/* Product grid */}
@@ -3461,11 +3395,11 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         {posProd.filter(p=>stockTotal(p)>0).map(p=>{
           const st=stockTotal(p);const hasVars=(p.variantes||[]).length>0;
           return(
-          <div key={p.id} onClick={()=>posAddProduct(p)} style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:isMobile?'8px':'10px',cursor:'pointer',boxShadow:C.shadow,transition:'all 0.15s',minHeight:isMobile?104:'auto'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.pink;e.currentTarget.style.background=C.pinkLight;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.cardBorder;e.currentTarget.style.background=C.card;}}>
-            <div style={{width:'100%',height:52,borderRadius:8,background:p.foto?'transparent':C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:isMobile?5:7,overflow:'hidden'}}>
+          <div key={p.id} onClick={()=>posAddProduct(p)} style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:'10px',cursor:'pointer',boxShadow:C.shadow,transition:'all 0.15s'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.pink;e.currentTarget.style.background=C.pinkLight;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.cardBorder;e.currentTarget.style.background=C.card;}}>
+            <div style={{width:'100%',height:52,borderRadius:8,background:p.foto?'transparent':C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:7,overflow:'hidden'}}>
               {p.foto?<img src={p.foto} alt="" style={{width:'100%',height:'100%',objectFit:'cover',borderRadius:8}}/>:<span style={{fontSize:22}}>🏷️</span>}
             </div>
-            <div style={{fontWeight:700,fontSize:isMobile?10:11,color:C.text,marginBottom:2,lineHeight:1.2,minHeight:isMobile?24:'auto'}}>{p.nombre}</div>
+            <div style={{fontWeight:700,fontSize:11,color:C.text,marginBottom:3,lineHeight:1.3}}>{p.nombre}</div>
             <div style={{fontWeight:800,fontSize:13,color:C.pink}}>{fmt(p.precio)}</div>
             <div style={{fontSize:10,color:C.textLight}}>Stock: {st}{hasVars&&<span style={{marginLeft:4,background:C.purpleLight,color:C.purple,borderRadius:4,padding:'1px 4px',fontSize:9,fontWeight:700}}>VAR</span>}</div>
             {st<=(p.stockMinimo||0)&&<div style={{fontSize:9,color:C.red,fontWeight:700,marginTop:2}}>⚠️ BAJO</div>}
@@ -3764,67 +3698,35 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 {/* ════════════════ INVENTARIO ════════════════ */}
 {tab==='Inventario'&&(
   <div>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:isMobile?'stretch':'center',flexDirection:isMobile?'column':'row',gap:isMobile?10:0,marginBottom:13}}>
-      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-        <p style={{color:C.textMid,fontSize:12}}>{products.length} productos · Valor: <strong style={{color:C.pink}}>{fmt(products.reduce((a,p)=>a+p.precio*stockTotal(p),0))}</strong></p>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:13}}>
+      <div style={{display:'flex',alignItems:'center',gap:8}}>
+        <p style={{color:C.textMid,fontSize:12}}>{products.length} productos · Valor: <strong style={{color:C.pink}}>{fmt(products.reduce((a,p)=>a+p.precio*p.stock,0))}</strong></p>
+        {/* Filtro stock bajo */}
         <button
           onClick={()=>setSearch(s=>s==='__STOCKBAJO__'?'':'__STOCKBAJO__')}
           style={{display:'flex',alignItems:'center',gap:5,padding:'5px 11px',borderRadius:8,border:`2px solid ${search==='__STOCKBAJO__'?C.red:C.border}`,background:search==='__STOCKBAJO__'?C.redLight:'transparent',color:search==='__STOCKBAJO__'?C.red:C.textMid,fontWeight:search==='__STOCKBAJO__'?700:500,fontSize:11,cursor:'pointer',whiteSpace:'nowrap'}}>
           ⚠️ Stock Bajo {alertasStock.length>0&&<span style={{background:search==='__STOCKBAJO__'?C.red:'#fca5a5',color:'#fff',borderRadius:999,fontSize:9,fontWeight:800,padding:'1px 5px'}}>{alertasStock.length}</span>}
         </button>
       </div>
-      <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>
+      <div style={{display:'flex',gap:7}}>
         <button style={{...S.btnSm,fontSize:11,background:C.purpleLight,color:C.purple}} onClick={()=>setModal('etiquetas')}>🏷️ Etiquetas</button>
         <button style={{...S.btnGreen,fontSize:12}} onClick={()=>setCsvImportModal(true)}>📥 Importar CSV</button>
         <button style={S.btn} onClick={openAddP}>+ Nuevo Producto</button>
       </div>
     </div>
-    {isMobile?(
-      <div>
-        <div style={{position:'relative',marginBottom:12}}>
-          <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight,fontSize:13}}>🔍</span>
-          <input style={S.searchBar} value={search==='__STOCKBAJO__'?'':search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por nombre, categoría o código..." />
-        </div>
-        <div style={{display:'grid',gap:10,paddingBottom:96}}>
-          {fp.map(p=>{
-            const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
-            const low=p.stockMinimo>0&&stockTotal(p)<=p.stockMinimo;
-            const prov=proveedoresSafe.find(x=>x.id===p.proveedorId);
-            return(
-              <div key={p.id} style={{...S.card,padding:12,border:low?`1px solid ${C.redBorder}`:`1px solid ${C.cardBorder}`}}>
-                <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
-                  {p.foto?<img src={p.foto} alt="" style={{width:56,height:56,borderRadius:10,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:56,height:56,borderRadius:10,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>🏷️</div>}
-                  <div style={{flex:1,minWidth:0}}>
-                    <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-                      <div style={{fontWeight:800,fontSize:14,color:C.text}}>{p.nombre}</div>
-                      {low&&<span style={{fontSize:10,background:C.redLight,color:C.red,borderRadius:6,padding:'2px 6px',fontWeight:800}}>⚠️ Bajo</span>}
-                    </div>
-                    <div style={{fontSize:11,color:C.textLight,marginTop:2,fontFamily:'monospace'}}>{p.codigoBarras||'Sin código'}</div>
-                    <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:6}}>
-                      <Badge text={p.categoria||'—'} color={C.purple} bg={C.purpleLight}/>
-                      <Badge text={`Stock ${stockTotal(p)}`} color={stockTotal(p)<=(p.stockMinimo||0)?C.red:stockTotal(p)<20?C.amber:C.green} bg={stockTotal(p)<=(p.stockMinimo||0)?C.redLight:stockTotal(p)<20?C.amberLight:C.greenLight}/>
-                    </div>
-                    <div style={{display:'grid',gridTemplateColumns:'repeat(3,minmax(0,1fr))',gap:8,marginTop:8}}>
-                      <div><div style={{fontSize:10,color:C.textLight}}>Precio</div><div style={{fontWeight:800,color:C.pink,fontSize:13}}>{fmt(p.precio)}</div></div>
-                      <div><div style={{fontSize:10,color:C.textLight}}>Costo</div><div style={{fontWeight:700,color:C.text,fontSize:12}}>{fmt(p.costo)}</div></div>
-                      <div><div style={{fontSize:10,color:C.textLight}}>Margen</div><div style={{fontWeight:800,color:Number(mg)>=30?C.green:C.amber,fontSize:12}}>{mg}%</div></div>
-                    </div>
-                    <div style={{fontSize:11,color:C.textMid,marginTop:6}}>Proveedor: {prov?.nombre||'—'}</div>
-                  </div>
-                </div>
-                <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:8,marginTop:10}}>
-                  <button style={{...S.btnSm,padding:'8px 6px',fontSize:11}} onClick={()=>openEditP(p)}>✏️</button>
-                  <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.greenLight,color:C.green}} onClick={()=>{setMovForm({tipo:'ingreso',productoId:String(p.id),cantidad:'',nota:'',fecha:today()});setModal('ingresoRapido');}}>➕</button>
-                  <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.amberLight,color:C.amber}} onClick={()=>{setEdit(p);setModal('historialPrecios');}}>📈</button>
-                  <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.redLight,color:C.red}} onClick={()=>delP(p.id)}>🗑️</button>
-                </div>
-              </div>
-            );
-          })}
-          {fp.length===0&&<div style={{...S.card,padding:22,textAlign:'center',color:C.textLight}}>Sin productos</div>}
-        </div>
+    <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
+      <div style={{position:'relative',flex:1}}>
+        <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight,fontSize:12}}>🔍</span>
+        <input style={S.searchBar} value={search==='__STOCKBAJO__'?'':search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por nombre, categoría o código..."/>
+        {search==='__STOCKBAJO__'&&<span style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',fontSize:11,color:C.red,fontWeight:700,pointerEvents:'none'}}>⚠️ Filtrando stock bajo</span>}
       </div>
-    ):(
+      <div style={{display:'flex',alignItems:'center',gap:5,flexShrink:0}}>
+        <span style={{fontSize:11,color:C.textMid,whiteSpace:'nowrap'}}>Ordenar:</span>
+        {[['','Por defecto'],['categoria','Categoría'],['nombre','Nombre'],['precio','Precio ↓'],['stock','Stock ↓']].map(([v,l])=>(
+          <button key={v} onClick={()=>setInvSort(v)} style={{...S.btnSm,fontSize:10,background:invSort===v?C.purple:C.purpleLight,color:invSort===v?'#fff':C.purple,padding:'4px 9px'}}>{l}</button>
+        ))}
+      </div>
+    </div>
     <div style={S.card}><table style={S.table}><thead><tr>{['','Producto','Código','Cat.','Proveedor','Stock','Precio','Costo','Margen','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{fp.map(p=>{
       const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
@@ -3841,16 +3743,16 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           {(p.variantes||[]).length>0&&<span style={{marginLeft:5,fontSize:9,background:C.purpleLight,color:C.purple,borderRadius:4,padding:'1px 5px',fontWeight:700}}>VAR {p.variantes.length}</span>}
         </td>
         <td style={{...S.td,fontWeight:700,color:C.pink}}>{fmt(p.precio)}</td>
-        <td style={{...S.td,fontWeight:700}}>{fmt(p.costo)}</td>
-        <td style={S.td}><Badge text={`${mg}%`} color={mg>=30?C.green:C.amber} bg={mg>=30?C.greenLight:C.amberLight}/></td>
-        <td style={{...S.td,whiteSpace:'nowrap'}}>
-          <button style={S.btnSm} onClick={()=>openEditP(p)}>Editar</button>
-          <button style={{...S.btnSm,background:C.greenLight,color:C.green,borderColor:C.greenBorder}} onClick={()=>{setMovForm({tipo:'ingreso',productoId:String(p.id),cantidad:'',nota:'',fecha:today()});setModal('ingresoRapido');}}>+Stock</button>
-          <button style={{...S.btnSm,background:C.redLight,color:C.red,borderColor:C.redBorder}} onClick={()=>askConf(`¿Eliminar "${p.nombre}"?`,()=>delP(p.id),C.red)}>Eliminar</button>
+        <td style={{...S.td,color:C.textMid,fontSize:12}}>{fmt(p.costo)}</td>
+        <td style={{...S.td,fontWeight:700,color:C.green,fontSize:12}}>{mg}%</td>
+        <td style={S.td}>
+          <IBtn icon="📦" title="Ingresar stock" color={C.green} bg={C.greenLight} onClick={()=>openIngresoRapido(p)}/>
+          <IBtn icon="📈" title="Historial de precios" color={C.amber} bg={C.amberLight} onClick={()=>{setEdit(p);setModal('historialPrecios');}}/>
+          <IBtn icon="✏️" onClick={()=>openEditP(p)}/>
+          <IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>delP(p.id)}/>
         </td>
       </tr>;
     })}{fp.length===0&&<tr><td colSpan={10} style={{...S.td,textAlign:'center',color:C.textLight,padding:'22px'}}>Sin productos</td></tr>}</tbody></table></div>
-    )}
   </div>
 )}
 
@@ -4678,7 +4580,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     ):(
       /* Formulario de edición */
       <div style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:13,padding:'18px 20px',boxShadow:C.shadow}}>
-        <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'1fr 1fr',gap:11,paddingBottom:isMobile?80:0}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:11}}>
           <div style={{gridColumn:'1/-1'}}><Fld label="🌸 Nombre del Negocio *" value={configForm.nombre} onChange={e=>setConfigForm(f=>({...f,nombre:e.target.value}))} placeholder="Ej: AdornArte"/></div>
           <Fld label="✨ Slogan" value={configForm.slogan} onChange={e=>setConfigForm(f=>({...f,slogan:e.target.value}))} placeholder="Ej: Resalta Tu Belleza"/>
           <Fld label="📄 RTN" value={configForm.rtn} onChange={e=>setConfigForm(f=>({...f,rtn:e.target.value}))} placeholder="0000-0000-000000"/>
@@ -4905,13 +4807,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
       {pVariantes.length===0&&<Fld label="Stock inicial" type="number" value={pForm.stock} onChange={e=>setPForm({...pForm,stock:e.target.value})} min="0"/>}
       <div><label style={pErr.precio?S.labelErr:S.label}>{pErr.precio?'⚠ Precio (L) *':'Precio de Venta (L)'}</label><input type="number" value={pForm.precio} onChange={e=>{setPForm({...pForm,precio:e.target.value});setPErr(x=>({...x,precio:false}));}} style={pErr.precio?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
       <div><label style={pErr.costo?S.labelErr:S.label}>{pErr.costo?'⚠ Costo (L) *':'Costo / Compra (L)'}</label><input type="number" value={pForm.costo} onChange={e=>{setPForm({...pForm,costo:e.target.value});setPErr(x=>({...x,costo:false}));}} style={pErr.costo?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
-      <div style={{gridColumn:isMobile?'1/-1':'auto'}}>
-        <label style={S.label}>Código de Barras</label>
-        <div style={{display:'flex',gap:8}}>
-          <input value={pForm.codigoBarras} onChange={e=>setPForm({...pForm,codigoBarras:e.target.value})} placeholder="Escanea o escribe" style={{...S.input,marginBottom:0,flex:1,fontFamily:'monospace'}}/>
-          <button type="button" onClick={()=>startCameraScan('product')} style={{...S.btnOutline,padding:'0 12px',whiteSpace:'nowrap'}}>📷 Escanear</button>
-        </div>
-      </div>
+      <Fld label="Código de Barras" value={pForm.codigoBarras} onChange={e=>setPForm({...pForm,codigoBarras:e.target.value})} placeholder="Escanea o escribe" style={{...S.input,fontFamily:'monospace'}}/>
       <Fld label="Stock Mínimo (alerta)" type="number" value={pForm.stockMinimo} onChange={e=>setPForm({...pForm,stockMinimo:e.target.value})} min="0"/>
       <div style={{gridColumn:'1/-1'}}>
         <Sel label="Proveedor" value={pForm.proveedorId} onChange={e=>setPForm({...pForm,proveedorId:e.target.value})}>
@@ -6824,26 +6720,26 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
 })()}
 
       {cameraScanOpen&&(
-        <div onClick={()=>{ void stopCameraScan(); }} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.55)',zIndex:300,display:'flex',alignItems:isMobile?'flex-end':'center',justifyContent:'center',padding:isMobile?0:16}}>
-          <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:isMobile?'100%':460,background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:isMobile?'18px 18px 0 0':16,boxShadow:C.shadowMd,padding:14,paddingBottom:`calc(14px + env(safe-area-inset-bottom, 0px))`,maxHeight:isMobile?'86vh':'auto',overflowY:'auto'}}>
+        <div onClick={stopCameraScan} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.55)',zIndex:300,display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:420,background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:16,boxShadow:C.shadowMd,padding:14}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-              <div style={{fontWeight:800,color:C.text}}>{cameraScanTarget==='product'?'📷 Escanear código del producto':'📷 Escanear con cámara'}</div>
-              <button onClick={()=>{ void stopCameraScan(); }} style={{background:'none',border:'none',fontSize:18,cursor:'pointer',color:C.textMid}}>✕</button>
+              <div style={{fontWeight:800,color:C.text}}>📷 Escanear con cámara</div>
+              <button onClick={stopCameraScan} style={{background:'none',border:'none',fontSize:18,cursor:'pointer',color:C.textMid}}>✕</button>
             </div>
             <div style={{borderRadius:12,overflow:'hidden',background:'#111',minHeight:220,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:10}}>
-              {cameraUsingHtml5?<div id={cameraRegionId} style={{width:'100%',minHeight:260}}/>:(cameraSupported?<video ref={cameraVideoRef} playsInline muted style={{width:'100%',maxHeight:320,objectFit:'cover'}}/>:<div style={{padding:20,color:'#fff',fontSize:12}}>La cámara no está disponible en este dispositivo.</div>)}
+              {cameraSupported?<video ref={cameraVideoRef} playsInline muted style={{width:'100%',maxHeight:280,objectFit:'cover'}}/>:<div style={{padding:20,color:'#fff',fontSize:12}}>La cámara no está disponible en este dispositivo.</div>}
             </div>
-            <div style={{fontSize:11,color:cameraScanMsg?.startsWith('No se encontró')?C.red:C.textMid,marginBottom:8,minHeight:16}}>{cameraScanMsg||(cameraScanTarget==='product'?'Apunta al código para llenar el campo automáticamente.':'Alinea el código de barras frente a la cámara.')}</div>
+            <div style={{fontSize:11,color:cameraScanMsg?.startsWith('No se encontró')?C.red:C.textMid,marginBottom:8,minHeight:16}}>{cameraScanMsg||'Alinea el código de barras frente a la cámara.'}</div>
             <div style={{display:'flex',gap:8}}>
               <input value={cameraManual} onChange={e=>setCameraManual(e.target.value)} placeholder="Ingresar código manualmente" style={{...S.input,marginBottom:0,flex:1,fontFamily:'monospace'}}/>
-              <button onClick={()=>applyScannedCode(cameraManual)} style={{...S.btn,padding:'0 14px'}}>Aplicar</button>
+              <button onClick={()=>applyScannedCode(cameraManual)} style={{...S.btn,padding:'0 14px'}}>Agregar</button>
             </div>
           </div>
         </div>
       )}
       {isMobile&&(
         <div style={{position:'fixed',left:0,right:0,bottom:0,zIndex:120,display:'flex',justifyContent:'center',pointerEvents:'none'}}>
-          <div style={{pointerEvents:'auto',display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,background:C.card,border:`1px solid ${C.cardBorder}`,boxShadow:C.shadowMd,borderRadius:18,padding:'8px 10px',margin:`0 10px calc(10px + env(safe-area-inset-bottom, 0px))`,width:'min(100%,480px)'}}>
+          <div style={{pointerEvents:'auto',display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,background:C.card,border:`1px solid ${C.cardBorder}`,boxShadow:C.shadowMd,borderRadius:18,padding:'8px 10px',margin:'0 10px 10px',width:'min(100%,480px)'}}>
             {[['Caja','🖥️'],['Inventario','📦'],['Ventas','🛍️'],['Clientes','👥']].map(([id,icon])=>(
               <button key={id} onClick={()=>{setTab(id);setSearch('');}} style={{border:'none',borderRadius:12,padding:'8px 6px',background:tab===id?C.pinkLight:'transparent',color:tab===id?C.pink:C.textMid,fontWeight:700,fontSize:11,cursor:'pointer'}}>{icon}<div style={{fontSize:10,marginTop:2}}>{id}</div></button>
             ))}
