@@ -855,45 +855,110 @@ export default function App(){
   const [cameraSupported,setCameraSupported]=useState(false);
   const [cameraScanMsg,setCameraScanMsg]=useState('');
   const [cameraManual,setCameraManual]=useState('');
+  const [cameraScanTarget,setCameraScanTarget]=useState('pos');
+  const [cameraUsingHtml5,setCameraUsingHtml5]=useState(false);
   const cameraVideoRef=useRef(null);
   const cameraStreamRef=useRef(null);
   const cameraLoopRef=useRef(null);
+  const cameraHtml5Ref=useRef(null);
+  const cameraRegionId='aa-camera-region';
 
   useEffect(()=>{
     setCameraSupported(typeof navigator!=='undefined' && !!navigator.mediaDevices?.getUserMedia);
   },[]);
 
-  const stopCameraScan=useCallback(()=>{
+  const ensureHtml5QrLib=useCallback(async()=>{
+    if(typeof window==='undefined') return false;
+    if(window.Html5Qrcode) return true;
+    const existing=document.querySelector('script[data-aa-html5qrcode="1"]');
+    if(existing){
+      await new Promise(resolve=>{
+        if(window.Html5Qrcode) return resolve();
+        existing.addEventListener('load',()=>resolve(),{once:true});
+        existing.addEventListener('error',()=>resolve(),{once:true});
+      });
+      return !!window.Html5Qrcode;
+    }
+    const script=document.createElement('script');
+    script.src='https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';
+    script.async=true;
+    script.dataset.aaHtml5qrcode='1';
+    document.body.appendChild(script);
+    await new Promise(resolve=>{
+      script.addEventListener('load',()=>resolve(),{once:true});
+      script.addEventListener('error',()=>resolve(),{once:true});
+    });
+    return !!window.Html5Qrcode;
+  },[]);
+
+  const stopCameraScan=useCallback(async()=>{
     try{ if(cameraLoopRef.current) cancelAnimationFrame(cameraLoopRef.current); }catch{}
     cameraLoopRef.current=null;
+    try{
+      if(cameraHtml5Ref.current){
+        const ref=cameraHtml5Ref.current;
+        cameraHtml5Ref.current=null;
+        try{ await ref.stop(); }catch{}
+        try{ await ref.clear(); }catch{}
+      }
+    }catch{}
     try{ cameraStreamRef.current?.getTracks?.().forEach(t=>t.stop()); }catch{}
     cameraStreamRef.current=null;
+    setCameraUsingHtml5(false);
     setCameraScanOpen(false);
   },[]);
 
   const applyScannedCode=useCallback((rawCode)=>{
     const code=String(rawCode||'').trim();
     if(!code) return false;
+    if(cameraScanTarget==='product'){
+      setPForm(f=>({...f,codigoBarras:code}));
+      setCameraManual('');
+      setCameraScanMsg(`Código detectado: ${code}`);
+      setTimeout(()=>{ void stopCameraScan(); },180);
+      return true;
+    }
     const p=findByBarcode(code) || safeList(products).find(x=>(x.codigoBarras||'').trim()===code);
     if(p){
       posAddProduct(p);
       setPosBarcode('');
       setCameraManual('');
       setCameraScanMsg(`Producto detectado: ${p.nombre}`);
-      setTimeout(()=>stopCameraScan(),180);
+      setTimeout(()=>{ void stopCameraScan(); },180);
       return true;
     }
     setCameraScanMsg(`No se encontró el código: ${code}`);
     return false;
-  },[findByBarcode, products, posAddProduct, stopCameraScan]);
+  },[cameraScanTarget, findByBarcode, products, posAddProduct, stopCameraScan]);
 
-  const startCameraScan=useCallback(async()=>{
+  const startCameraScan=useCallback(async(target='pos')=>{
+    setCameraScanTarget(target);
     setCameraScanMsg('');
     setCameraManual('');
     setCameraScanOpen(true);
+    setCameraUsingHtml5(false);
     if(!(typeof navigator!=='undefined' && navigator.mediaDevices?.getUserMedia)){
       setCameraScanMsg('Tu navegador no permite cámara. Usa el campo manual.');
       return;
+    }
+    const html5Ok=await ensureHtml5QrLib();
+    if(html5Ok && typeof window!=='undefined' && window.Html5Qrcode){
+      try{
+        const scanner=new window.Html5Qrcode(cameraRegionId);
+        cameraHtml5Ref.current=scanner;
+        setCameraUsingHtml5(true);
+        await scanner.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 240, height: 120 }, aspectRatio: 1.777 },
+          (decodedText)=>{ applyScannedCode(decodedText); },
+          ()=>{}
+        );
+        setCameraScanMsg(target==='product'?'Escaneando código del producto...':'Escaneando producto...');
+        return;
+      }catch(e){
+        console.error('Html5Qrcode:',e);
+        setCameraUsingHtml5(false);
+      }
     }
     try{
       const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
@@ -904,7 +969,7 @@ export default function App(){
       }
       const BD=typeof window!=='undefined' ? window.BarcodeDetector : undefined;
       if(!BD){
-        setCameraScanMsg('Escaneo automático no disponible aquí. Usa el campo manual o el lector físico.');
+        setCameraScanMsg('Escaneo automático no disponible aquí. Usa el campo manual.');
         return;
       }
       const detector=new BD({formats:['code_128','ean_13','ean_8','upc_a','upc_e','qr_code']});
@@ -918,10 +983,11 @@ export default function App(){
         cameraLoopRef.current=requestAnimationFrame(tick);
       };
       cameraLoopRef.current=requestAnimationFrame(tick);
+      setCameraScanMsg('Alinea el código frente a la cámara.');
     }catch(e){
-      setCameraScanMsg('No se pudo abrir la cámara. Revisa permisos.');
+      setCameraScanMsg('No se pudo abrir la cámara. Revisa permisos o usa el campo manual.');
     }
-  },[applyScannedCode, cameraScanOpen]);
+  },[applyScannedCode, cameraScanOpen, ensureHtml5QrLib]);
 
   /* ── Cumpleaños notificaciones ── */
   const [cumpleNotis, setCumpleNotis] = useState([]);
@@ -1560,12 +1626,12 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   };
 
   /* ── BARCODE ── */
-  function findByBarcode(code){
-    const t=String(code||'').trim();
+  const findByBarcode=code=>{
+    const t=code.trim();
     const p=safeList(products).find(x=>x.codigoBarras===t);
     if(p){showToast(`📦 ${p.nombre} — ${fmt(p.precio)}`,C.blue);return p;}
     showToast(`Código "${t}" no encontrado ❌`,C.amber);return null;
-  }
+  };
 
   /* ── POS computed ── */
   const posSubtotalBruto=useMemo(()=>posItems.reduce((a,i)=>a+i.precio*i.cantidad,0),[posItems]);
@@ -1611,7 +1677,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
     const ex=posItems.find(i=>i.itemKey===itemKey);
     if(ex){setPosItems(its=>its.map(i=>i.itemKey===itemKey?{...i,cantidad:i.cantidad+1,subtotal:(i.cantidad+1)*i.precio}:i));}
     else{setPosItems(its=>[...its,{itemKey,productoId:prod.id,varianteId:varianteId??null,varianteNombre:variante?.nombre||null,productoNombre:nomCompleto,cantidad:1,precio:precioFinal,precioOrig:precioFinal,costo:prod.costo,subtotal:precioFinal,esEspecial:!!pesp}]);}
-  }
+  };
   const posChangeQty=(itemKey,delta)=>{
     const it=posItems.find(i=>i.itemKey===itemKey);if(!it)return;
     const prod=safeList(products).find(p=>p.id===it.productoId);
@@ -3396,7 +3462,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
               onKeyDown={e=>{if(e.key==='Enter'&&posBarcode.trim()){const p=findByBarcode(posBarcode);if(p)posAddProduct(p);setPosBarcode('');posBarRef.current?.focus();}}}
               placeholder="Escanear barras" style={{...S.input,width:isMobile?'100%':180,marginBottom:0,fontFamily:'monospace',paddingLeft:28,background:'#f0f9ff',borderColor:'#bfdbfe'}}/>
           </div>
-          <button onClick={startCameraScan} style={{...S.btnOutline,padding:'0 12px',fontSize:12,minWidth:isMobile?98:92,whiteSpace:'nowrap'}}>📷 Cámara</button>
+          <button onClick={()=>startCameraScan('pos')} style={{...S.btnOutline,padding:'0 12px',fontSize:12,minWidth:isMobile?98:92,whiteSpace:'nowrap'}}>📷 Cámara</button>
         </div>
       </div>
       {/* Product grid */}
@@ -4859,7 +4925,10 @@ Monto a pagar:`,cp.saldo.toFixed(2));
       {pVariantes.length===0&&<Fld label="Stock inicial" type="number" value={pForm.stock} onChange={e=>setPForm({...pForm,stock:e.target.value})} min="0"/>}
       <div><label style={pErr.precio?S.labelErr:S.label}>{pErr.precio?'⚠ Precio (L) *':'Precio de Venta (L)'}</label><input type="number" value={pForm.precio} onChange={e=>{setPForm({...pForm,precio:e.target.value});setPErr(x=>({...x,precio:false}));}} style={pErr.precio?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
       <div><label style={pErr.costo?S.labelErr:S.label}>{pErr.costo?'⚠ Costo (L) *':'Costo / Compra (L)'}</label><input type="number" value={pForm.costo} onChange={e=>{setPForm({...pForm,costo:e.target.value});setPErr(x=>({...x,costo:false}));}} style={pErr.costo?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
-      <Fld label="Código de Barras" value={pForm.codigoBarras} onChange={e=>setPForm({...pForm,codigoBarras:e.target.value})} placeholder="Escanea o escribe" style={{...S.input,fontFamily:'monospace'}}/>
+      <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'1fr auto',gap:8,alignItems:'end'}}>
+        <Fld label="Código de Barras" value={pForm.codigoBarras} onChange={e=>setPForm({...pForm,codigoBarras:e.target.value})} placeholder="Escanea o escribe" style={{...S.input,fontFamily:'monospace'}}/>
+        <button type="button" onClick={()=>startCameraScan('product')} style={{...S.btnOutline,minHeight:40,whiteSpace:'nowrap'}}>📷 Escanear</button>
+      </div>
       <Fld label="Stock Mínimo (alerta)" type="number" value={pForm.stockMinimo} onChange={e=>setPForm({...pForm,stockMinimo:e.target.value})} min="0"/>
       <div style={{gridColumn:'1/-1'}}>
         <Sel label="Proveedor" value={pForm.proveedorId} onChange={e=>setPForm({...pForm,proveedorId:e.target.value})}>
@@ -6772,19 +6841,25 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
 })()}
 
       {cameraScanOpen&&(
-        <div onClick={stopCameraScan} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.55)',zIndex:300,display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+        <div onClick={()=>{void stopCameraScan();}} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.55)',zIndex:300,display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
           <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:420,background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:16,boxShadow:C.shadowMd,padding:14}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-              <div style={{fontWeight:800,color:C.text}}>📷 Escanear con cámara</div>
-              <button onClick={stopCameraScan} style={{background:'none',border:'none',fontSize:18,cursor:'pointer',color:C.textMid}}>✕</button>
+              <div style={{fontWeight:800,color:C.text}}>{cameraScanTarget==='product'?'📷 Escanear código del producto':'📷 Escanear con cámara'}</div>
+              <button onClick={()=>{void stopCameraScan();}} style={{background:'none',border:'none',fontSize:18,cursor:'pointer',color:C.textMid}}>✕</button>
             </div>
             <div style={{borderRadius:12,overflow:'hidden',background:'#111',minHeight:220,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:10}}>
-              {cameraSupported?<video ref={cameraVideoRef} playsInline muted style={{width:'100%',maxHeight:280,objectFit:'cover'}}/>:<div style={{padding:20,color:'#fff',fontSize:12}}>La cámara no está disponible en este dispositivo.</div>}
+              {cameraUsingHtml5
+                ? <div id={cameraRegionId} style={{width:'100%',minHeight:260}} />
+                : cameraSupported
+                  ? <video ref={cameraVideoRef} playsInline muted style={{width:'100%',maxHeight:280,objectFit:'cover'}}/>
+                  : <div style={{padding:20,color:'#fff',fontSize:12}}>La cámara no está disponible en este dispositivo.</div>}
             </div>
-            <div style={{fontSize:11,color:cameraScanMsg?.startsWith('No se encontró')?C.red:C.textMid,marginBottom:8,minHeight:16}}>{cameraScanMsg||'Alinea el código de barras frente a la cámara.'}</div>
+            <div style={{fontSize:11,color:cameraScanMsg?.startsWith('No se encontró')?C.red:C.textMid,marginBottom:8,minHeight:16}}>
+              {cameraScanMsg||(cameraScanTarget==='product'?'Apunta al código para llenar el campo automáticamente.':'Alinea el código de barras frente a la cámara.')}
+            </div>
             <div style={{display:'flex',gap:8}}>
               <input value={cameraManual} onChange={e=>setCameraManual(e.target.value)} placeholder="Ingresar código manualmente" style={{...S.input,marginBottom:0,flex:1,fontFamily:'monospace'}}/>
-              <button onClick={()=>applyScannedCode(cameraManual)} style={{...S.btn,padding:'0 14px'}}>Agregar</button>
+              <button onClick={()=>applyScannedCode(cameraManual)} style={{...S.btn,padding:'0 14px'}}>Aplicar</button>
             </div>
           </div>
         </div>
