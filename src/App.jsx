@@ -83,7 +83,6 @@ const pct   = n=>`${Number(n).toFixed(1)}%`;
 const isBirthdayToday=fecha=>{if(!fecha)return false;const t=new Date();const b=new Date(fecha+'T12:00:00');return t.getMonth()===b.getMonth()&&t.getDate()===b.getDate();};
 /* stock real (suma variantes si las tiene) */
 const stockTotal=p=>p.variantes?.length>0?p.variantes.reduce((a,v)=>a+v.stock,0):p.stock;
-const safeList=v=>Array.isArray(v)?v:[];
 
 /* ─── STORAGE ────────────────────────────────────────────── */
 const KEYS={
@@ -386,7 +385,7 @@ const openPDF=(html,filename='AdornArte.pdf')=>{
       <button onclick="window.print()" style="margin-left:auto;background:#fff;color:#1e40af;border:none;border-radius:6px;padding:7px 20px;font-weight:700;font-size:13px;cursor:pointer">🖨️ Guardar PDF / Imprimir</button>
       <button onclick="window.close()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);border-radius:6px;padding:7px 14px;font-size:12px;cursor:pointer">✕ Cerrar</button>
     </div>
-    <div style="height:isMobile?42:52px"></div>${html.replace(/^<!DOCTYPE[^>]*>.*?<body[^>]*>/si,'').replace(/<\/body>.*$/si,'')}</body></html>`);
+    <div style="height:52px"></div>${html.replace(/^<!DOCTYPE[^>]*>.*?<body[^>]*>/si,'').replace(/<\/body>.*$/si,'')}</body></html>`);
   pw.document.close();pw.focus();
 };
 const pdfBase=(titulo,subtitulo,tableHead,tableBody,totalesRows='',cfg={})=>{
@@ -1159,10 +1158,6 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   },[ventas,gastos]);
   useEffect(()=>{if(alertasStock.length>0)setAlertaDismissed(false);},[alertasStock.length]);
   const TABS=useMemo(()=>ALL_TABS.filter(t=>session&&TAB_ROLES[t.id]?.includes(session.rol)),[session]);
-  const mobileBottomTabs=useMemo(()=>{
-    const preferred=['Caja','Inventario','Movimientos','Ventas','Creditos','Clientes'];
-    return preferred.map(id=>TABS.find(t=>t.id===id)).filter(Boolean).slice(0,6);
-  },[TABS]);
 
 
   /* ── LOGIN ── */
@@ -1188,114 +1183,11 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
 
   /* ── BARCODE ── */
   const findByBarcode=code=>{
-    const t=String(code||'').trim();
-    if(!t) return null;
-    const p=safeList(products).find(x=>String(x?.codigoBarras||'').trim()===t);
-    if(p){
-      showToast(`📦 ${p.nombre} — ${fmt(p.precio)}`,C.blue);
-      return p;
-    }
-    showToast(`Código "${t}" no encontrado ❌`,C.amber);
-    return null;
+    const t=code.trim();
+    const p=products.find(x=>x.codigoBarras===t);
+    if(p){showToast(`📦 ${p.nombre} — ${fmt(p.precio)}`,C.blue);return p;}
+    showToast(`Código "${t}" no encontrado ❌`,C.amber);return null;
   };
-
-  const stopCameraScan=useCallback(async()=>{
-    try{ if(cameraLoopRef.current) cancelAnimationFrame(cameraLoopRef.current); }catch{}
-    cameraLoopRef.current=null;
-    try{
-      if(cameraHtml5Ref.current){
-        const ref=cameraHtml5Ref.current;
-        cameraHtml5Ref.current=null;
-        try{ await ref.stop(); }catch{}
-        try{ await ref.clear(); }catch{}
-      }
-    }catch{}
-    try{ cameraStreamRef.current?.getTracks?.().forEach(t=>t.stop()); }catch{}
-    cameraStreamRef.current=null;
-    setCameraUsingHtml5(false);
-    setCameraScanOpen(false);
-  },[]);
-
-  const applyScannedCode=useCallback((rawCode)=>{
-    const code=String(rawCode||'').trim();
-    if(!code) return false;
-    if(cameraScanTarget==='product'){
-      setPForm(f=>({...f,codigoBarras:code}));
-      setCameraManual('');
-      setCameraScanMsg(`Código detectado: ${code}`);
-      setTimeout(()=>{ void stopCameraScan(); },180);
-      return true;
-    }
-    const p=findByBarcode(code);
-    if(p){
-      posAddProduct(p);
-      setPosBarcode('');
-      setCameraManual('');
-      setCameraScanMsg(`Producto detectado: ${p.nombre}`);
-      setTimeout(()=>{ void stopCameraScan(); },180);
-      return true;
-    }
-    setCameraScanMsg(`No se encontró el código: ${code}`);
-    return false;
-  },[cameraScanTarget, findByBarcode, posAddProduct, stopCameraScan]);
-
-  const startCameraScan=useCallback(async(target='pos')=>{
-    setCameraScanTarget(target);
-    setCameraScanMsg('');
-    setCameraManual('');
-    setCameraScanOpen(true);
-    setCameraUsingHtml5(false);
-    if(!(typeof navigator!=='undefined' && navigator.mediaDevices?.getUserMedia)){
-      setCameraScanMsg('Tu navegador no permite cámara. Usa el campo manual.');
-      return;
-    }
-    const html5Ok=await ensureHtml5QrLib();
-    if(html5Ok && typeof window!=='undefined' && window.Html5Qrcode){
-      try{
-        const scanner=new window.Html5Qrcode(cameraRegionId);
-        cameraHtml5Ref.current=scanner;
-        setCameraUsingHtml5(true);
-        await scanner.start(
-          { facingMode:'environment' },
-          { fps:10, qrbox:{ width:220, height:120 }, aspectRatio:1.777 },
-          (decodedText)=>{ applyScannedCode(decodedText); },
-          ()=>{}
-        );
-        setCameraScanMsg(target==='product'?'Escaneando código del producto...':'Escaneando producto...');
-        return;
-      }catch(e){
-        console.error('Html5Qrcode:',e);
-        setCameraUsingHtml5(false);
-      }
-    }
-    try{
-      const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
-      cameraStreamRef.current=stream;
-      if(cameraVideoRef.current){
-        cameraVideoRef.current.srcObject=stream;
-        await cameraVideoRef.current.play().catch(()=>{});
-      }
-      const BD=typeof window!=='undefined' ? window.BarcodeDetector : undefined;
-      if(!BD){
-        setCameraScanMsg('Escaneo automático no disponible aquí. Usa el campo manual.');
-        return;
-      }
-      const detector=new BD({formats:['code_128','ean_13','ean_8','upc_a','upc_e','qr_code']});
-      const tick=async()=>{
-        if(!cameraVideoRef.current || !cameraScanOpen) return;
-        try{
-          const out=await detector.detect(cameraVideoRef.current);
-          const code=out?.[0]?.rawValue;
-          if(code){ applyScannedCode(code); return; }
-        }catch{}
-        cameraLoopRef.current=requestAnimationFrame(tick);
-      };
-      cameraLoopRef.current=requestAnimationFrame(tick);
-      setCameraScanMsg('Alinea el código frente a la cámara.');
-    }catch(e){
-      setCameraScanMsg('No se pudo abrir la cámara. Revisa permisos o usa el campo manual.');
-    }
-  },[applyScannedCode, cameraScanOpen, ensureHtml5QrLib]);
 
   /* ── POS computed ── */
   const posSubtotalBruto=useMemo(()=>posItems.reduce((a,i)=>a+i.precio*i.cantidad,0),[posItems]);
@@ -2665,9 +2557,9 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       {/* ── SIDEBAR ── */}
       <aside style={S.sidebar}>
         <div style={{padding:'14px 12px 10px',borderBottom:`1px solid ${C.border}`}}>
-          <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}> 
+          <div style={{display:'flex',alignItems:'center',gap:8}}>
             <img src={logo} alt="" style={{width:38,height:38,borderRadius:8,objectFit:'contain',border:`2px solid ${C.pinkLight}`,background:'#fff'}}/>
-            <div><div style={{fontWeight:800,fontSize:isMobile?12:13,color:C.pink,fontFamily:'Georgia,serif'}}>AdornArte</div><div style={{fontSize:7,color:C.textLight,letterSpacing:'2px'}}>RESALTA TU BELLEZA</div></div>
+            <div><div style={{fontWeight:800,fontSize:13,color:C.pink,fontFamily:'Georgia,serif'}}>AdornArte</div><div style={{fontSize:7,color:C.textLight,letterSpacing:'2px'}}>RESALTA TU BELLEZA</div></div>
           </div>
           {/* Session info */}
           <div style={{marginTop:8,padding:'6px 9px',background:C.pinkLight,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
@@ -2750,7 +2642,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         )}
         {showNotifs&&<div onClick={()=>setShowNotifs(false)} style={{position:'fixed',inset:0,zIndex:199}}/>}
 
-        <div style={isMobile?{...S.content,padding:'12px 10px 110px',maxWidth:'100vw',overflowX:'hidden'}:S.content}>
+        <div style={S.content}>
 
         {/* ── Notificaciones de cumpleaños ── */}
         {cumpleNotis.filter(c=>!cumpleDismissed.includes(c.id)).map(c=>(
@@ -2765,7 +2657,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
   <div style={{display:'grid',gridTemplateColumns:'1fr 380px',gap:16,height:'calc(100vh - 130px)',minHeight:500}}>
     {/* Left: product selector */}
     <div style={{display:'flex',flexDirection:'column',gap:10,overflow:'hidden'}}>
-      <div style={{display:'flex',gap:8,flexWrap:isMobile?'wrap':'nowrap'}}> 
+      <div style={{display:'flex',gap:8}}>
         <div style={{flex:1,position:'relative'}}>
           <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight,fontSize:13}}>🔍</span>
           <input ref={posItemProd} value={posBusca} onChange={e=>setPosBusca(e.target.value)}
@@ -2786,20 +2678,19 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           <span style={{position:'absolute',left:9,top:'50%',transform:'translateY(-50%)',fontSize:14,color:C.blue,pointerEvents:'none'}}>📷</span>
           <input ref={posBarRef} value={posBarcode} onChange={e=>setPosBarcode(e.target.value)}
             onKeyDown={e=>{if(e.key==='Enter'&&posBarcode.trim()){const p=findByBarcode(posBarcode);if(p)posAddProduct(p);setPosBarcode('');posBarRef.current?.focus();}}}
-            placeholder="Escanear barras" style={{...S.input,width:isMobile?'100%':180,marginBottom:0,fontFamily:'monospace',paddingLeft:28,background:'#f0f9ff',borderColor:'#bfdbfe'}}/>
+            placeholder="Escanear barras" style={{...S.input,width:180,marginBottom:0,fontFamily:'monospace',paddingLeft:28,background:'#f0f9ff',borderColor:'#bfdbfe'}}/>
         </div>
-        <button onClick={()=>startCameraScan('pos')} style={{...S.btnOutline,padding:'0 12px',fontSize:12,minWidth:isMobile?98:92,whiteSpace:'nowrap'}}>📷 Cámara</button>
       </div>
       {/* Product grid */}
       <div style={{flex:1,overflowY:'auto',display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:8,alignContent:'start'}}>
         {posProd.filter(p=>stockTotal(p)>0).map(p=>{
           const st=stockTotal(p);const hasVars=(p.variantes||[]).length>0;
           return(
-          <div key={p.id} onClick={()=>posAddProduct(p)} style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:isMobile?'8px':'10px',cursor:'pointer',boxShadow:C.shadow,transition:'all 0.15s',minHeight:isMobile?104:'auto'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.pink;e.currentTarget.style.background=C.pinkLight;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.cardBorder;e.currentTarget.style.background=C.card;}}>
-            <div style={{width:'100%',height:52,borderRadius:8,background:p.foto?'transparent':C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:isMobile?5:7,overflow:'hidden'}}>
+          <div key={p.id} onClick={()=>posAddProduct(p)} style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:'10px',cursor:'pointer',boxShadow:C.shadow,transition:'all 0.15s'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.pink;e.currentTarget.style.background=C.pinkLight;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.cardBorder;e.currentTarget.style.background=C.card;}}>
+            <div style={{width:'100%',height:52,borderRadius:8,background:p.foto?'transparent':C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:7,overflow:'hidden'}}>
               {p.foto?<img src={p.foto} alt="" style={{width:'100%',height:'100%',objectFit:'cover',borderRadius:8}}/>:<span style={{fontSize:22}}>🏷️</span>}
             </div>
-            <div style={{fontWeight:700,fontSize:isMobile?10:11,color:C.text,marginBottom:2,lineHeight:1.2,minHeight:isMobile?24:'auto'}}>{p.nombre}</div>
+            <div style={{fontWeight:700,fontSize:11,color:C.text,marginBottom:3,lineHeight:1.3}}>{p.nombre}</div>
             <div style={{fontWeight:800,fontSize:13,color:C.pink}}>{fmt(p.precio)}</div>
             <div style={{fontSize:10,color:C.textLight}}>Stock: {st}{hasVars&&<span style={{marginLeft:4,background:C.purpleLight,color:C.purple,borderRadius:4,padding:'1px 4px',fontSize:9,fontWeight:700}}>VAR</span>}</div>
             {st<=(p.stockMinimo||0)&&<div style={{fontSize:9,color:C.red,fontWeight:700,marginTop:2}}>⚠️ BAJO</div>}
@@ -3015,7 +2906,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
     <div style={{display:'grid',gridTemplateColumns:'1.3fr 1fr',gap:14}}>
       <div>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:7}}><h3 style={{fontSize:12,fontWeight:700}}>Últimas Ventas</h3><button onClick={()=>setTab('Ventas')} style={S.btnSm}>Ver →</button></div>
-        <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Folio','Cliente','Tipo','Total','Estado'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+        <div style={S.card}><table style={S.table}><thead><tr>{['Folio','Cliente','Tipo','Total','Estado'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
         <tbody>{ventas.slice(0,6).map(v=><tr key={v.id} onMouseEnter={e=>e.currentTarget.style.background='#faf9fb'} onMouseLeave={e=>e.currentTarget.style.background=''}>
           <td style={{...S.td,fontSize:10,color:C.textMid}}>{v.folio}</td>
           <td style={{...S.td,fontWeight:600,fontSize:12}}>{v.clienteNombre.split(' ')[0]}</td>
@@ -3026,7 +2917,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       </div>
       <div>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:7}}><h3 style={{fontSize:12,fontWeight:700}}>Stock Crítico</h3><button onClick={()=>setTab('Inventario')} style={S.btnSm}>Ver →</button></div>
-        <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Producto','Stock','Mín'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+        <div style={S.card}><table style={S.table}><thead><tr>{['Producto','Stock','Mín'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
         <tbody>{[...products].sort((a,b)=>a.stock-b.stock).slice(0,7).map(p=><tr key={p.id}>
           <td style={{...S.td,fontWeight:600,fontSize:11}}>{p.nombre}</td>
           <td style={S.td}><Badge text={p.stock} color={p.stock<=(p.stockMinimo||0)?C.red:p.stock<20?C.amber:C.green} bg={p.stock<=(p.stockMinimo||0)?C.redLight:p.stock<20?C.amberLight:C.greenLight}/></td>
@@ -3098,7 +2989,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 {/* ════════════════ INVENTARIO ════════════════ */}
 {tab==='Inventario'&&(
   <div>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:isMobile?'stretch':'center',flexDirection:isMobile?'column':'row',gap:isMobile?10:0,marginBottom:13}}>
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:13}}>
       <div style={{display:'flex',alignItems:'center',gap:8}}>
         <p style={{color:C.textMid,fontSize:12}}>{products.length} productos · Valor: <strong style={{color:C.pink}}>{fmt(products.reduce((a,p)=>a+p.precio*p.stock,0))}</strong></p>
         {/* Filtro stock bajo */}
@@ -3108,14 +2999,14 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           ⚠️ Stock Bajo {alertasStock.length>0&&<span style={{background:search==='__STOCKBAJO__'?C.red:'#fca5a5',color:'#fff',borderRadius:999,fontSize:9,fontWeight:800,padding:'1px 5px'}}>{alertasStock.length}</span>}
         </button>
       </div>
-      <div style={{display:'flex',gap:7,flexWrap:'wrap'}}> 
+      <div style={{display:'flex',gap:7}}>
         <button style={{...S.btnSm,fontSize:11,background:C.purpleLight,color:C.purple}} onClick={()=>setModal('etiquetas')}>🏷️ Etiquetas</button>
         <button style={{...S.btnGreen,fontSize:12}} onClick={()=>setCsvImportModal(true)}>📥 Importar CSV</button>
         <button style={S.btn} onClick={openAddP}>+ Nuevo Producto</button>
       </div>
     </div>
-    <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center',flexDirection:isMobile?'column':'row'}}> 
-      <div style={{position:'relative',flex:1,width:isMobile?'100%':'auto'}}> 
+    <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
+      <div style={{position:'relative',flex:1}}>
         <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight,fontSize:12}}>🔍</span>
         <input style={S.searchBar} value={search==='__STOCKBAJO__'?'':search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por nombre, categoría o código..."/>
         {search==='__STOCKBAJO__'&&<span style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',fontSize:11,color:C.red,fontWeight:700,pointerEvents:'none'}}>⚠️ Filtrando stock bajo</span>}
@@ -3127,51 +3018,11 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         ))}
       </div>
     </div>
-    {isMobile?(
-      <div style={{display:'grid',gap:10,paddingBottom:90}}>
-        {fp.map(p=>{
-          const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
-          const low=p.stockMinimo>0&&p.stock<=p.stockMinimo;
-          const prov=safeList(proveedores).find(x=>x.id===p.proveedorId);
-          return(
-            <div key={p.id} style={{...S.card,padding:12,border:low?`1px solid ${C.red}`:`1px solid ${C.cardBorder}`}}>
-              <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
-                {p.foto?<img src={p.foto} alt="" style={{width:56,height:56,borderRadius:10,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:56,height:56,borderRadius:10,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>🏷️</div>}
-                <div style={{flex:1,minWidth:0}}>
-                  <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-                    <div style={{fontWeight:800,fontSize:14,color:C.text}}>{p.nombre}</div>
-                    {low&&<span style={{fontSize:10,background:C.redLight,color:C.red,borderRadius:6,padding:'2px 6px',fontWeight:800}}>⚠️ Stock bajo</span>}
-                  </div>
-                  <div style={{fontSize:11,color:C.textLight,marginTop:2,fontFamily:'monospace'}}>{p.codigoBarras||'Sin código'}</div>
-                  <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:6}}>
-                    <Badge text={p.categoria||'—'} color={C.purple} bg={C.purpleLight}/>
-                    <Badge text={`Stock ${stockTotal(p)}`} color={stockTotal(p)<=(p.stockMinimo||0)?C.red:stockTotal(p)<20?C.amber:C.green} bg={stockTotal(p)<=(p.stockMinimo||0)?C.redLight:stockTotal(p)<20?C.amberLight:C.greenLight}/>
-                  </div>
-                  <div style={{display:'grid',gridTemplateColumns:'repeat(3,minmax(0,1fr))',gap:8,marginTop:8}}>
-                    <div><div style={{fontSize:10,color:C.textLight}}>Precio</div><div style={{fontWeight:800,color:C.pink,fontSize:13}}>{fmt(p.precio)}</div></div>
-                    <div><div style={{fontSize:10,color:C.textLight}}>Costo</div><div style={{fontWeight:700,color:C.text,fontSize:12}}>{fmt(p.costo)}</div></div>
-                    <div><div style={{fontSize:10,color:C.textLight}}>Margen</div><div style={{fontWeight:800,color:Number(mg)>=30?C.green:C.amber,fontSize:12}}>{mg}%</div></div>
-                  </div>
-                  <div style={{fontSize:11,color:C.textMid,marginTop:6}}>Proveedor: {prov?.nombre||'—'}</div>
-                </div>
-              </div>
-              <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:8,marginTop:10}}>
-                <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.greenLight,color:C.green}} onClick={()=>openIngresoRapido(p)}>➕ Stock</button>
-                <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.amberLight,color:C.amber}} onClick={()=>{setEdit(p);setModal('historialPrecios');}}>📈 Hist.</button>
-                <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.blueLight,color:C.blue}} onClick={()=>openEditP(p)}>✏️ Editar</button>
-                <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.redLight,color:C.red}} onClick={()=>delP(p.id)}>🗑️ Borrar</button>
-              </div>
-            </div>
-          );
-        })}
-        {fp.length===0&&<div style={{...S.card,padding:'22px',textAlign:'center',color:C.textLight}}>Sin productos</div>}
-      </div>
-    ):(
-    <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:980}}><thead><tr>{['','Producto','Código','Cat.','Proveedor','Stock','Precio','Costo','Margen','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+    <div style={S.card}><table style={S.table}><thead><tr>{['','Producto','Código','Cat.','Proveedor','Stock','Precio','Costo','Margen','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{fp.map(p=>{
       const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
       const low=p.stockMinimo>0&&p.stock<=p.stockMinimo;
-      const prov=safeList(proveedores).find(x=>x.id===p.proveedorId);
+      const prov=proveedores.find(x=>x.id===p.proveedorId);
       return<tr key={p.id} style={{background:low?'rgba(220,38,38,0.02)':''}} onMouseEnter={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.05)':'#faf9fb'} onMouseLeave={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.02)':''}>
         <td style={{...S.td,width:38,padding:'6px 5px'}}>{p.foto?<img src={p.foto} alt="" style={{width:32,height:32,borderRadius:7,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:32,height:32,borderRadius:7,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🏷️</div>}</td>
         <td style={{...S.td,fontWeight:700,fontSize:12}}>{p.nombre}{low&&<span style={{marginLeft:5,fontSize:9,background:C.redLight,color:C.red,borderRadius:5,padding:'1px 4px',fontWeight:700}}>⚠️</span>}</td>
@@ -3193,7 +3044,6 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         </td>
       </tr>;
     })}{fp.length===0&&<tr><td colSpan={10} style={{...S.td,textAlign:'center',color:C.textLight,padding:'22px'}}>Sin productos</td></tr>}</tbody></table></div>
-    )}
   </div>
 )}
 
@@ -3205,7 +3055,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       {mFiltro==='dia'&&<><input type="date" value={mFiltroFecha||today()} onChange={e=>setMFiltroFecha(e.target.value)} style={{...S.input,width:148,padding:'6px 10px'}}/><button onClick={()=>setMFiltroFecha(today())} style={{...S.btnSm,fontSize:10}}>Hoy</button></>}
       <div style={{marginLeft:'auto'}}><button style={S.btn} onClick={openAddMov}>+ Nuevo Movimiento</button></div>
     </div>
-    <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Fecha','Tipo','Producto','Cantidad','Stock Antes','Stock Después','Cajero','Nota',['admin','supervisor'].includes(session?.rol)?'Acc.':''].filter(Boolean).map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+    <div style={S.card}><table style={S.table}><thead><tr>{['Fecha','Tipo','Producto','Cantidad','Stock Antes','Stock Después','Cajero','Nota',['admin','supervisor'].includes(session?.rol)?'Acc.':''].filter(Boolean).map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{fm.length===0&&<tr><td colSpan={9} style={{...S.td,textAlign:'center',color:C.textLight,padding:'22px'}}>Sin movimientos</td></tr>}
     {fm.map(m=><tr key={m.id} style={{background:m.tipo==='ingreso'?'rgba(5,150,105,0.02)':'rgba(220,38,38,0.02)'}}>
       <td style={{...S.td,fontSize:11,color:C.textMid}}>{m.fecha}</td>
@@ -3233,7 +3083,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       </div>
     </div>
     <div style={{position:'relative',marginBottom:12}}><span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight}}>🔍</span><input style={S.searchBar} value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar folio, cliente..."/></div>
-    <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Folio','Fecha','Cliente','Cajero','Tipo','Pago','Desc.','Total','Estado','Nota','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+    <div style={S.card}><table style={S.table}><thead><tr>{['Folio','Fecha','Cliente','Cajero','Tipo','Pago','Desc.','Total','Estado','Nota','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{fv.map(v=>(
       <tr key={v.id} onMouseEnter={e=>e.currentTarget.style.background=C.pinkLight} onMouseLeave={e=>e.currentTarget.style.background=''}>
         <td style={{...S.td,fontWeight:700,fontSize:10,color:C.textMid}}>{v.folio}</td>
@@ -3374,7 +3224,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       {devoluciones.length>0&&<button style={{...S.btnOutline,fontSize:12,padding:'7px 12px',color:C.red,borderColor:C.red}} onClick={()=>exportPDFDevoluciones(devoluciones,config)}>📄 Exportar PDF</button>}
     </div>
     <div style={{position:'relative',marginBottom:12}}><span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight}}>🔍</span><input style={S.searchBar} value={devBusca} onChange={e=>setDevBusca(e.target.value)} placeholder="Buscar devolución..."/></div>
-    <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Folio Dev.','Fecha','Venta Orig.','Cliente','Artículos','Total Dev.','Motivo','Cajero'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+    <div style={S.card}><table style={S.table}><thead><tr>{['Folio Dev.','Fecha','Venta Orig.','Cliente','Artículos','Total Dev.','Motivo','Cajero'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{devoluciones.filter(d=>!devBusca||d.clienteNombre.toLowerCase().includes(devBusca.toLowerCase())||d.ventaFolio.toLowerCase().includes(devBusca.toLowerCase())||d.folio.toLowerCase().includes(devBusca.toLowerCase())).map(d=>(
       <tr key={d.id} onMouseEnter={e=>e.currentTarget.style.background='#faf9fb'} onMouseLeave={e=>e.currentTarget.style.background=''}>
         <td style={{...S.td,fontWeight:700,fontSize:11,color:C.teal}}>{d.folio}</td>
@@ -3399,7 +3249,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
     <div style={{display:'flex',justifyContent:'flex-end',marginBottom:10}}>
       {fcred.length>0&&<button style={{...S.btnOutline,fontSize:12,padding:'7px 12px',color:C.red,borderColor:C.red}} onClick={()=>exportPDFCreditos(fcred,config)}>📄 Exportar PDF</button>}
     </div>
-    <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Folio','Fecha','Cliente','Total','Abonado','Saldo','Estado','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+    <div style={S.card}><table style={S.table}><thead><tr>{['Folio','Fecha','Cliente','Total','Abonado','Saldo','Estado','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{fcred.map(v=>(
       <tr key={v.id} style={{background:v.estado==='pendiente'?'rgba(217,119,6,0.03)':'rgba(5,150,105,0.02)'}}>
         <td style={{...S.td,fontWeight:700,fontSize:11}}>{v.folio}</td><td style={{...S.td,fontSize:11,color:C.textMid}}>{v.fecha}</td>
@@ -3421,7 +3271,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       <div style={{display:'flex',gap:7}}><button style={{...S.btnOutline,fontSize:12,padding:'7px 12px'}} onClick={()=>setModal('catGastos')}>⚙️ Categorías</button>{gastos.length>0&&<button style={{...S.btnOutline,fontSize:12,padding:'7px 12px',color:C.red,borderColor:C.red}} onClick={()=>exportPDFGastos(fg,config)}>📄 Exportar PDF</button>}<button style={S.btn} onClick={()=>{setGastoF({descripcion:'',monto:'',categoriaId:'',proveedorId:'',fecha:today(),nota:''});setModal('addGasto');}}>+ Nuevo Gasto</button></div>
     </div>
     <div style={{position:'relative',marginBottom:12}}><span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight}}>🔍</span><input style={S.searchBar} value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar gasto..."/></div>
-    <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Fecha','Descripción','Categoría','Proveedor','Monto','Nota','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+    <div style={S.card}><table style={S.table}><thead><tr>{['Fecha','Descripción','Categoría','Proveedor','Monto','Nota','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{fg.map(g=><tr key={g.id} onMouseEnter={e=>e.currentTarget.style.background='#faf9fb'} onMouseLeave={e=>e.currentTarget.style.background=''}>
       <td style={{...S.td,fontSize:11,color:C.textMid}}>{g.fecha}</td><td style={{...S.td,fontWeight:600,fontSize:12}}>{g.descripcion}</td>
       <td style={S.td}><Badge text={g.categoriaNombre||'Sin cat.'} color={C.orange} bg={C.orangeLight} border={C.orangeBorder}/></td>
@@ -3561,7 +3411,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
           <label style={S.label}>Proveedor *</label>
           <select value={cpForm.proveedorId} onChange={e=>setCpForm(f=>({...f,proveedorId:e.target.value}))} style={{...S.input,cursor:'pointer'}}>
             <option value="">Seleccionar proveedor...</option>
-            {safeList(proveedores).map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+            {proveedores.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
           </select>
         </div>
         <Fld label="Concepto *" value={cpForm.concepto} onChange={e=>setCpForm(f=>({...f,concepto:e.target.value}))} placeholder="Ej: Factura #1234, Mercancía agosto..."/>
@@ -3621,12 +3471,12 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:14,marginBottom:14}}>
       {/* Por producto */}
       <div><h3 style={{fontSize:12,fontWeight:700,marginBottom:7}}>Ventas por Producto</h3>
-      <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Producto','Uds.','Total','Ganancia'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+      <div style={S.card}><table style={S.table}><thead><tr>{['Producto','Uds.','Total','Ganancia'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
       <tbody>{reporte.porProducto.map(p=><tr key={p.nombre}><td style={{...S.td,fontWeight:600,fontSize:11}}>{p.nombre}</td><td style={{...S.td,color:C.textMid,fontSize:11}}>{p.cantidad}</td><td style={{...S.td,fontWeight:700,color:C.pink,fontSize:12}}>{fmt(p.total)}</td><td style={{...S.td,fontWeight:700,color:C.green,fontSize:12}}>{fmt(p.ganancia)}</td></tr>)}{reporte.porProducto.length===0&&<tr><td colSpan={4} style={{...S.td,textAlign:'center',color:C.textLight,padding:'16px'}}>Sin datos</td></tr>}</tbody></table></div></div>
 
       {/* Sin movimiento */}
       <div><h3 style={{fontSize:12,fontWeight:700,marginBottom:7}}>Sin Movimiento en Período ⚠️</h3>
-      <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Producto','Stock','Valor'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+      <div style={S.card}><table style={S.table}><thead><tr>{['Producto','Stock','Valor'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
       <tbody>{reporte.sinMov.slice(0,8).map(p=><tr key={p.id}><td style={{...S.td,fontWeight:600,fontSize:11}}>{p.nombre}</td><td style={S.td}><Badge text={p.stock} color={C.amber} bg={C.amberLight}/></td><td style={{...S.td,fontWeight:700,color:C.amber,fontSize:12}}>{fmt(p.precio*p.stock)}</td></tr>)}{reporte.sinMov.length===0&&<tr><td colSpan={3} style={{...S.td,textAlign:'center',color:C.green,padding:'16px',fontWeight:600}}>✅ Todos vendieron</td></tr>}</tbody></table></div></div>
     </div>
 
@@ -3890,7 +3740,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
 
         <div style={{display:'grid',gridTemplateColumns:'1.2fr 1fr',gap:13,marginBottom:13}}>
           <div><h3 style={{fontSize:11,fontWeight:700,marginBottom:6}}>Ventas del Día</h3>
-          <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Folio','Cliente','Tipo','Pago','Total'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+          <div style={S.card}><table style={S.table}><thead><tr>{['Folio','Cliente','Tipo','Pago','Total'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
           <tbody>{corte.vD.map(v=><tr key={v.id}>
             <td style={{...S.td,fontSize:10}}>{v.folio}</td>
             <td style={{...S.td,fontWeight:600,fontSize:11}}>{v.clienteNombre}</td>
@@ -3900,7 +3750,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
           </tr>)}{corte.vD.length===0&&<tr><td colSpan={5} style={{...S.td,textAlign:'center',color:C.textLight,padding:'16px'}}>Sin ventas 🌸</td></tr>}</tbody></table></div></div>
 
           <div><h3 style={{fontSize:11,fontWeight:700,marginBottom:6}}>Por Producto</h3>
-          <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Producto','Uds.','Total','Ganancia'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+          <div style={S.card}><table style={S.table}><thead><tr>{['Producto','Uds.','Total','Ganancia'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
           <tbody>{corte.porProducto.map(p=><tr key={p.nombre}>
             <td style={{...S.td,fontWeight:600,fontSize:11}}>{p.nombre}</td>
             <td style={{...S.td,color:C.textMid,fontSize:11}}>{p.cantidad}</td>
@@ -3926,7 +3776,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
         {/* Arqueos del día */}
         {arqueos.filter(a=>a.fecha===corteDate).length>0&&(
           <><h3 style={{fontSize:11,fontWeight:700,marginTop:4,marginBottom:6}}>Arqueos del Día</h3>
-          <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Hora','Cajero','Sistema','Contado','Diferencia'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+          <div style={S.card}><table style={S.table}><thead><tr>{['Hora','Cajero','Sistema','Contado','Diferencia'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
           <tbody>{arqueos.filter(a=>a.fecha===corteDate).map(a=><tr key={a.id}>
             <td style={{...S.td,fontSize:10,color:C.textMid}}>{a.hora}</td>
             <td style={{...S.td,fontSize:11}}>{a.cajero}</td>
@@ -3987,7 +3837,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     ):(
       /* Formulario de edición */
       <div style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:13,padding:'18px 20px',boxShadow:C.shadow}}>
-        <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'1fr 1fr',gap:11,paddingBottom:isMobile?80:0}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:11}}>
           <div style={{gridColumn:'1/-1'}}><Fld label="🌸 Nombre del Negocio *" value={configForm.nombre} onChange={e=>setConfigForm(f=>({...f,nombre:e.target.value}))} placeholder="Ej: AdornArte"/></div>
           <Fld label="✨ Slogan" value={configForm.slogan} onChange={e=>setConfigForm(f=>({...f,slogan:e.target.value}))} placeholder="Ej: Resalta Tu Belleza"/>
           <Fld label="📄 RTN" value={configForm.rtn} onChange={e=>setConfigForm(f=>({...f,rtn:e.target.value}))} placeholder="0000-0000-000000"/>
@@ -4214,13 +4064,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
       {pVariantes.length===0&&<Fld label="Stock inicial" type="number" value={pForm.stock} onChange={e=>setPForm({...pForm,stock:e.target.value})} min="0"/>}
       <div><label style={pErr.precio?S.labelErr:S.label}>{pErr.precio?'⚠ Precio (L) *':'Precio de Venta (L)'}</label><input type="number" value={pForm.precio} onChange={e=>{setPForm({...pForm,precio:e.target.value});setPErr(x=>({...x,precio:false}));}} style={pErr.precio?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
       <div><label style={pErr.costo?S.labelErr:S.label}>{pErr.costo?'⚠ Costo (L) *':'Costo / Compra (L)'}</label><input type="number" value={pForm.costo} onChange={e=>{setPForm({...pForm,costo:e.target.value});setPErr(x=>({...x,costo:false}));}} style={pErr.costo?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
-      <div style={{gridColumn:isMobile?'1/-1':'auto'}}>
-        <label style={S.label}>Código de Barras</label>
-        <div style={{display:'flex',gap:8,flexWrap:isMobile?'wrap':'nowrap'}}>
-          <input value={pForm.codigoBarras} onChange={e=>setPForm({...pForm,codigoBarras:e.target.value})} placeholder="Escanea o escribe" style={{...S.input,fontFamily:'monospace',marginBottom:0,flex:1,minWidth:0}}/>
-          <button type="button" onClick={()=>startCameraScan('product')} style={{...S.btnOutline,padding:'0 12px',whiteSpace:'nowrap',minHeight:40}}>📷 Escanear</button>
-        </div>
-      </div>
+      <Fld label="Código de Barras" value={pForm.codigoBarras} onChange={e=>setPForm({...pForm,codigoBarras:e.target.value})} placeholder="Escanea o escribe" style={{...S.input,fontFamily:'monospace'}}/>
       <Fld label="Stock Mínimo (alerta)" type="number" value={pForm.stockMinimo} onChange={e=>setPForm({...pForm,stockMinimo:e.target.value})} min="0"/>
       <div style={{gridColumn:'1/-1'}}>
         <Sel label="Proveedor" value={pForm.proveedorId} onChange={e=>setPForm({...pForm,proveedorId:e.target.value})}>
@@ -4704,7 +4548,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     </div>
     {precioHistorial.filter(h=>h.productoId===editing.id).length===0
       ?<div style={{textAlign:'center',color:C.textLight,padding:'24px 0',fontSize:12}}>Sin cambios de precio registrados.<br/><span style={{fontSize:11}}>Los cambios se guardan automáticamente al editar el producto.</span></div>
-      :<div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Fecha','Precio Antes','Precio Nuevo','Costo Antes','Costo Nuevo','Cambio','Usuario'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+      :<div style={S.card}><table style={S.table}><thead><tr>{['Fecha','Precio Antes','Precio Nuevo','Costo Antes','Costo Nuevo','Cambio','Usuario'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
       <tbody>{precioHistorial.filter(h=>h.productoId===editing.id).map(h=>{
         const diff=h.precioNuevo-h.precioAntes;
         return<tr key={h.id}>
@@ -4728,7 +4572,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
   return(
   <Modal title={`🏷️ Precios Especiales — ${cli.nombre}`} onClose={()=>{closeModal();setEdit(null);}} wide>
     <p style={{fontSize:11,color:C.textMid,marginBottom:12}}>Asigna un precio especial (VIP) por producto. Déjalo en 0 o vacío para usar el precio normal. Se aplicará automáticamente en Caja al seleccionar este cliente.</p>
-    <div style={{...S.card,overflowX:'auto'}}><table style={{...S.table,minWidth:isMobile?860:'100%'}}><thead><tr>{['Producto','Precio Normal','Precio VIP','Ahorro','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+    <div style={S.card}><table style={S.table}><thead><tr>{['Producto','Precio Normal','Precio VIP','Ahorro','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{products.map(p=>{
       const esp=peMap[p.id]||'';
       const ahorro=esp&&+esp>0&&+esp<p.precio?p.precio-+esp:0;
@@ -6132,39 +5976,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
   );
 })()}
 
-      {cameraScanOpen&&(
-        <div onClick={()=>{ void stopCameraScan(); }} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.55)',zIndex:300,display:'flex',alignItems:isMobile?'flex-end':'center',justifyContent:'center',padding:isMobile?0:16}}>
-          <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:isMobile?'100%':460,background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:isMobile?'18px 18px 0 0':16,boxShadow:C.shadowMd,padding:14,paddingBottom:`calc(14px + env(safe-area-inset-bottom, 0px))`,maxHeight:isMobile?'86vh':'auto',overflowY:'auto'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-              <div style={{fontWeight:800,color:C.text}}>{cameraScanTarget==='product'?'📷 Escanear código del producto':'📷 Escanear con cámara'}</div>
-              <button onClick={()=>{ void stopCameraScan(); }} style={{background:'none',border:'none',fontSize:18,cursor:'pointer',color:C.textMid}}>✕</button>
-            </div>
-            <div style={{borderRadius:12,overflow:'hidden',background:'#111',minHeight:220,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:10}}>
-              {cameraUsingHtml5?<div id={cameraRegionId} style={{width:'100%',minHeight:260}}/>:(cameraSupported?<video ref={cameraVideoRef} playsInline muted style={{width:'100%',maxHeight:320,objectFit:'cover'}}/>:<div style={{padding:20,color:'#fff',fontSize:12}}>La cámara no está disponible en este dispositivo.</div>)}
-            </div>
-            <div style={{fontSize:11,color:cameraScanMsg?.startsWith('No se encontró')?C.red:C.textMid,marginBottom:8,minHeight:16}}>{cameraScanMsg||(cameraScanTarget==='product'?'Apunta al código para llenar el campo automáticamente.':'Alinea el código de barras frente a la cámara.')}</div>
-            <div style={{display:'flex',gap:8}}>
-              <input value={cameraManual} onChange={e=>setCameraManual(e.target.value)} placeholder="Ingresar código manualmente" style={{...S.input,marginBottom:0,flex:1,fontFamily:'monospace'}}/>
-              <button onClick={()=>applyScannedCode(cameraManual)} style={{...S.btn,padding:'0 14px'}}>Aplicar</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {isMobile&&(
-        <div style={{position:'fixed',left:0,right:0,bottom:0,zIndex:120,display:'flex',justifyContent:'center',pointerEvents:'none'}}>
-          <div style={{pointerEvents:'auto',display:'grid',gridTemplateColumns:`repeat(${Math.max(1,mobileBottomTabs.length||6)},1fr)`,gap:6,background:C.card,border:`1px solid ${C.cardBorder}`,boxShadow:C.shadowMd,borderRadius:20,padding:'7px 8px',margin:`0 8px calc(8px + env(safe-area-inset-bottom, 0px))`,width:'min(100%,520px)',backdropFilter:'blur(10px)'}}>
-            {mobileBottomTabs.map(t=>(
-              <button key={t.id} onClick={()=>{setTab(t.id);setSearch('');}} style={{border:'none',borderRadius:14,padding:'8px 4px',minHeight:58,background:tab===t.id?C.pinkLight:'transparent',color:tab===t.id?C.pink:C.textMid,fontWeight:700,fontSize:10,cursor:'pointer',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',gap:3}}>
-                <div style={{fontSize:18,lineHeight:1}}>{t.icon}</div>
-                <div style={{fontSize:10,lineHeight:1.05,whiteSpace:'nowrap'}}>{t.id==='Movimientos'?'Movs.':t.id==='Creditos'?'Créd.':t.id}</div>
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <style>{`*{box-sizing:border-box;}html,body,#root{max-width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;}body{padding-bottom:env(safe-area-inset-bottom,0px);}input:focus,select:focus{border-color:#e8417a!important;box-shadow:0 0 0 3px rgba(232,65,122,0.1);}input[type=number]::-webkit-inner-spin-button{opacity:0.4;}::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-thumb{background:${isDark?'#3d3555':'#e0d8ea'};border-radius:2px;}input,select,textarea,button{font-size:16px;}input,select,textarea{color-scheme:${isDark?'dark':'light'};}@supports(padding:max(0px)){body{padding-bottom:max(env(safe-area-inset-bottom,0px),0px);}}`}</style>
+      <style>{`*{box-sizing:border-box;}input:focus,select:focus{border-color:#e8417a!important;box-shadow:0 0 0 3px rgba(232,65,122,0.1);}input[type=number]::-webkit-inner-spin-button{opacity:0.4;}::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-thumb{background:${isDark?'#3d3555':'#e0d8ea'};border-radius:2px;}input,select,textarea{color-scheme:${isDark?'dark':'light'};}`}</style>
     </div>
     </ThemeCtx.Provider>
   );
