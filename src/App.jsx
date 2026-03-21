@@ -1,32 +1,38 @@
 import React,{useState,useMemo,useEffect,useRef,useCallback}from 'react';
 import logo from './logo.png';
-import { supabase } from './supabase';
-// Backup manual a Supabase
-const backupSupabase = async () => {
-  try {
+import { supabase, supabaseReady } from './supabase';
 
-    const data = {
-      fecha: new Date().toISOString(),
-      tipo: "manual"
-    };
 
-    const { error } = await supabase
-      .from("backups")
-      .insert([data]);
-
-    if (error) {
-      console.error("Error creando backup:", error);
-      alert("Error al crear backup");
-      return;
-    }
-
-    alert("✅ Backup creado correctamente");
-
-  } catch (err) {
-    console.error("Backup error:", err);
-    alert("Error ejecutando backup");
+const normalizeArray = (v, fb = []) => {
+  if (Array.isArray(v)) return v;
+  if (Array.isArray(v?.value)) return v.value;
+  if (typeof v === 'string') {
+    try {
+      const p = JSON.parse(v);
+      if (Array.isArray(p)) return p;
+      if (Array.isArray(p?.value)) return p.value;
+    } catch {}
   }
+  return Array.isArray(fb) ? fb : [];
 };
+const safeList = (v, fb = []) => normalizeArray(v, fb);
+const safeSetList = (setter, updater, fb = []) => {
+  setter(prev => {
+    const base = safeList(prev, fb);
+    return typeof updater === 'function' ? updater(base) : safeList(updater, fb);
+  });
+};
+
+const mergeProducts = (prevProducts, updatedProducts) => {
+  const map = new Map(safeList(prevProducts).map(p => [String(p?.id), p]));
+  safeList(updatedProducts).forEach(p => {
+    if (!p || p.id === undefined || p.id === null) return;
+    const prev = map.get(String(p.id)) || {};
+    map.set(String(p.id), { ...prev, ...p });
+  });
+  return Array.from(map.values());
+};
+
 
 /* ─── ROLES ──────────────────────────────────────────────── */
 const ROLES={admin:'Administrador',supervisor:'Supervisor',cajero:'Cajero'};
@@ -125,26 +131,238 @@ let _sbChannel = null; /* realtime channel */
 
 
 const load=(k,fb)=>{try{const v=localStorage.getItem(k);return v?JSON.parse(v):fb;}catch{return fb;}};
+
+/* IndexedDB para colecciones pesadas (sin borrar imágenes) */
+const IDB_NAME='adornarte_local_db';
+const IDB_STORE='kv';
+const IDB_VER=1;
+const idbOpen=()=>new Promise((resolve,reject)=>{
+  try{
+    const req=indexedDB.open(IDB_NAME,IDB_VER);
+    req.onupgradeneeded=()=>{
+      const db=req.result;
+      if(!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error||new Error('indexedDB open error'));
+  }catch(e){reject(e);}
+});
+const idbGet=(key)=>new Promise(async(resolve,reject)=>{
+  try{
+    const db=await idbOpen();
+    const tx=db.transaction(IDB_STORE,'readonly');
+    const st=tx.objectStore(IDB_STORE);
+    const req=st.get(key);
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error||new Error('indexedDB get error'));
+  }catch(e){reject(e);}
+});
+const idbSet=(key,value)=>new Promise(async(resolve,reject)=>{
+  try{
+    const db=await idbOpen();
+    const tx=db.transaction(IDB_STORE,'readwrite');
+    const st=tx.objectStore(IDB_STORE);
+    const req=st.put(value,key);
+    req.onsuccess=()=>resolve(true);
+    req.onerror=()=>reject(req.error||new Error('indexedDB put error'));
+  }catch(e){reject(e);}
+});
+
+const SYNC_META_KEY='aa_sync_meta';
+const getSyncMeta=()=>{try{return JSON.parse(localStorage.getItem(SYNC_META_KEY)||'{}')||{};}catch{return {};}};
+const setSyncMeta=(meta)=>{try{localStorage.setItem(SYNC_META_KEY,JSON.stringify(meta));}catch{}};
+const setSyncStamp=(key,ts)=>{const meta=getSyncMeta();meta[key]=ts;setSyncMeta(meta);};
+const getSyncStamp=(key)=>getSyncMeta()[key]||0;
+const REMOTE_SYNC_SKIP=new Set([KEYS.products]);
+const TABLE_SYNC_MAP={
+  [KEYS.products]:'adornarte_products',
+  [KEYS.ventas]:'adornarte_sales',
+  [KEYS.clientes]:'adornarte_customers',
+  [KEYS.abonos]:'adornarte_abonos',
+};
+const isTableSyncKey=(key)=>Object.prototype.hasOwnProperty.call(TABLE_SYNC_MAP,key);
+let _syncTimer=null;
+let _syncInFlight=false;
+const _syncQueue=new Map();
+const unwrapStoredData=(raw)=>{
+  if(raw && typeof raw==='object' && !Array.isArray(raw) && Object.prototype.hasOwnProperty.call(raw,'value') && Object.prototype.hasOwnProperty.call(raw,'_updatedAt')){
+    return { value: raw.value, updatedAt: +raw._updatedAt || 0 };
+  }
+  return { value: raw, updatedAt: 0 };
+};
+const flushSyncQueue=async()=>{
+  if(_syncInFlight||!_sbReady||!supabase||_syncQueue.size===0) return;
+  _syncInFlight=true;
+  try{
+    const entries=[..._syncQueue.entries()];
+    _syncQueue.clear();
+    for(const [key,entry] of entries){
+      const payload={ key, data:{ value:entry.value, _updatedAt:entry.updatedAt } };
+      try{
+        const {error}=await supabase.from('adornarte_store').upsert(payload,{onConflict:'key'});
+        if(error){
+          console.error('Supabase save error:', key, error.message);
+        }
+      }catch(e){
+        console.error('Supabase save crash:', key, e?.message||e);
+      }
+    }
+  }finally{
+    _syncInFlight=false;
+    if(_syncQueue.size){
+      clearTimeout(_syncTimer);
+      _syncTimer=setTimeout(()=>{ void flushSyncQueue(); },1200);
+    }
+  }
+};
+const enqueueRemoteSync=(key,value,updatedAt)=>{
+  if(!_sbReady||!supabase||REMOTE_SYNC_SKIP.has(key)) return;
+  let raw='';
+  try{ raw=JSON.stringify(value); }catch{}
+  if(raw && raw.length>120000){
+    console.warn('Supabase skip large payload:', key, raw.length);
+    return;
+  }
+  _syncQueue.set(key,{value,updatedAt});
+  clearTimeout(_syncTimer);
+  _syncTimer=setTimeout(()=>{ void flushSyncQueue(); },600);
+};
+
+const _tableSyncTimers=new Map();
+const _tableSyncInFlight=new Map();
+const _tableSyncQueue=new Map();
+
+const chunkArray=(arr,size)=>{const out=[];for(let i=0;i<arr.length;i+=size)out.push(arr.slice(i,i+size));return out;};
+const syncCollectionTable=async(key,items,updatedAt,opts={})=>{
+  const table=TABLE_SYNC_MAP[key];
+  if(!table||!_sbReady||!supabase) return;
+  const safeItems=Array.isArray(items)?items:[];
+  const prune=(opts?.prune !== undefined) ? !!opts.prune : key!==KEYS.products;
+  const stamp=updatedAt||Date.now();
+  const stampIso=new Date(stamp).toISOString();
+  try{
+    const rows=safeItems.map(item=>({
+      id:String(item?.id ?? uid()),
+      data:{...item,_updatedAt:stamp},
+      updated_at:stampIso,
+    }));
+    const batchSize=key===KEYS.products?15:100;
+    for(const batch of chunkArray(rows,batchSize)){
+      if(!batch.length) continue;
+      const {error:upsertError}=await supabase.from(table).upsert(batch,{onConflict:'id'});
+      if(upsertError) throw upsertError;
+    }
+    if(prune){
+      const {data:existing,error:existingError}=await supabase.from(table).select('id');
+      if(existingError) throw existingError;
+      const incomingIds=new Set(rows.map(r=>r.id));
+      const staleIds=(existing||[]).map(r=>String(r.id)).filter(id=>!incomingIds.has(id));
+      for(const batch of chunkArray(staleIds,200)){
+        if(!batch.length) continue;
+        const {error:deleteError}=await supabase.from(table).delete().in('id',batch);
+        if(deleteError) throw deleteError;
+      }
+    }
+  }catch(e){
+    console.error('Supabase table sync error:', key, e?.message||e);
+  }
+};
+
+const enqueueTableSync=(key,items,updatedAt)=>{
+  if(!_sbReady||!supabase||!isTableSyncKey(key)) return;
+  _tableSyncQueue.set(key,{items:Array.isArray(items)?items:[],updatedAt:updatedAt||Date.now()});
+  clearTimeout(_tableSyncTimers.get(key));
+  _tableSyncTimers.set(key,setTimeout(async()=>{
+    if(_tableSyncInFlight.get(key)) return;
+    _tableSyncInFlight.set(key,true);
+    try{
+      const entry=_tableSyncQueue.get(key);
+      _tableSyncQueue.delete(key);
+      if(entry) await syncCollectionTable(key,entry.items,entry.updatedAt);
+    }finally{
+      _tableSyncInFlight.set(key,false);
+      const next=_tableSyncQueue.get(key);
+      if(next) enqueueTableSync(key,next.items,next.updatedAt);
+    }
+  },500));
+};
+
+const loadCollectionTable=async(key)=>{
+  const table=TABLE_SYNC_MAP[key];
+  if(!table||!supabase) return {items:null,updatedAt:0};
+  const {data,error}=await supabase.from(table).select('id,data,updated_at').order('updated_at',{ascending:false});
+  if(error) throw error;
+  const rows=(data||[]).map(r=>({...(r.data||{}), id:(r.data&&r.data.id!==undefined?r.data.id:r.id)}));
+  const latest=(data||[]).reduce((mx,r)=>Math.max(mx,new Date(r.updated_at||0).getTime(), +(r.data?._updatedAt||0)),0);
+  return {items:rows,updatedAt:latest};
+};
+
+const upsertCollectionItem=async(key,item,updatedAt)=>{
+  const table=TABLE_SYNC_MAP[key];
+  if(!table||!_sbReady||!supabase||!item) return false;
+  const stamp=updatedAt||Date.now();
+  const row={
+    id:String(item?.id ?? uid()),
+    data:{...item,_updatedAt:stamp},
+    updated_at:new Date(stamp).toISOString(),
+  };
+  const {error}=await supabase.from(table).upsert(row,{onConflict:'id'});
+  if(error) throw error;
+  return true;
+};
+
+const deleteCollectionItem=async(key,id)=>{
+  const table=TABLE_SYNC_MAP[key];
+  if(!table||!_sbReady||!supabase||id===undefined||id===null) return false;
+  const {error}=await supabase.from(table).delete().eq('id',String(id));
+  if(error) throw error;
+  return true;
+};
+
+const upsertProductsByIds=async(productIds, sourceProducts, updatedAt)=>{
+  const ids=[...new Set((productIds||[]).map(id=>String(id)).filter(Boolean))];
+  if(!ids.length) return true;
+  const productsSafe=safeList(sourceProducts);
+  const touched=ids.map(id=>productsSafe.find(p=>String(p?.id)===id)).filter(Boolean);
+  if(!touched.length) return true;
+  const stamp=updatedAt||Date.now();
+  for(const p of touched){
+    await upsertCollectionItem(KEYS.products,p,stamp);
+  }
+  return true;
+};
+
+const replaceProductsRemote=async(sourceProducts, updatedAt)=>{
+  const productsSafe=safeList(sourceProducts);
+  const stamp=updatedAt||Date.now();
+  await syncCollectionTable(KEYS.products, productsSafe, stamp, {prune:true});
+  return true;
+};
+
 const persistStore = (k, v) => {
+  if(!k){ console.error('persistStore sin key'); return; }
+  const stamp=Date.now();
+  setSyncStamp(k, stamp);
+
+  if(k===KEYS.products){
+    (async()=>{
+      try{ await idbSet(k,v); }catch(e){ console.error('IndexedDB save error:',k,e?.message||e); }
+    })();
+    return;
+  }
+
   try {
     localStorage.setItem(k, JSON.stringify(v));
-  } catch {}
+  } catch (e) {
+    console.error('Local save error:', k, e?.message || e);
+  }
 
-  if (!_sbReady || !supabase) return;
+  if(isTableSyncKey(k)){
+    enqueueTableSync(k,v,stamp);
+    return;
+  }
 
-  (async () => {
-    try {
-      const { error } = await supabase
-        .from('adornarte_store')
-        .upsert({ key: k, data: v }, { onConflict: 'key' });
-
-      if (error) {
-        console.error('Supabase save error:', k, error.message);
-      }
-    } catch (e) {
-      console.error('Save crash avoided:', k, e?.message || e);
-    }
-  })();
+  enqueueRemoteSync(k,v,stamp);
 };
 
 /* ─── SEED ───────────────────────────────────────────────── */
@@ -297,7 +515,7 @@ const Stat=({icon,value,label,bg,sub,warn})=>{
 /* ─── INVOICE ─────────────────────────────────────────────── */
 function buildFactura(v,clientes,cfg={}){
   const config={...DEFAULT_CONFIG,...cfg};
-  const cli=clientes.find(c=>c.id===v.clienteId)||{nombre:v.clienteNombre,telefono:'',direccion:''};
+  const cli=safeList(clientes).find(c=>c.id===v.clienteId)||{nombre:v.clienteNombre,telefono:'',direccion:''};
   const fechaFmt=new Date(v.fecha+'T12:00:00').toLocaleDateString('es-HN',{year:'numeric',month:'long',day:'numeric'});
   const rows=v.items.map((it,i)=>`<tr>
     <td style="padding:7px 9px;border-bottom:1px solid #f0ebf5">${i+1}</td>
@@ -385,7 +603,7 @@ const openPDF=(html,filename='AdornArte.pdf')=>{
       <button onclick="window.print()" style="margin-left:auto;background:#fff;color:#1e40af;border:none;border-radius:6px;padding:7px 20px;font-weight:700;font-size:13px;cursor:pointer">🖨️ Guardar PDF / Imprimir</button>
       <button onclick="window.close()" style="background:transparent;color:#fff;border:1px solid rgba(255,255,255,0.5);border-radius:6px;padding:7px 14px;font-size:12px;cursor:pointer">✕ Cerrar</button>
     </div>
-    <div style="height:52px"></div>${html.replace(/^<!DOCTYPE[^>]*>.*?<body[^>]*>/si,'').replace(/<\/body>.*$/si,'')}</body></html>`);
+    <div style="height:isMobile?42:52px"></div>${html.replace(/^<!DOCTYPE[^>]*>.*?<body[^>]*>/si,'').replace(/<\/body>.*$/si,'')}</body></html>`);
   pw.document.close();pw.focus();
 };
 const pdfBase=(titulo,subtitulo,tableHead,tableBody,totalesRows='',cfg={})=>{
@@ -524,6 +742,16 @@ export default function App(){
 
   /* ── data ── */
   const [products,  setProducts] = useState(()=>load(KEYS.products,   IP));
+  useEffect(()=>{
+    let cancelled=false;
+    (async()=>{
+      try{
+        const idbProducts=await idbGet(KEYS.products);
+        if(!cancelled && Array.isArray(idbProducts) && idbProducts.length) setProducts(idbProducts);
+      }catch{}
+    })();
+    return()=>{cancelled=true;};
+  },[]);
   const [clientes,  setClientes] = useState(()=>load(KEYS.clientes,   IC));
   const [ventas,    setVentas]   = useState(()=>load(KEYS.ventas,     IV));
   const [movs,      setMovs]     = useState(()=>load(KEYS.movimientos,[]));
@@ -533,11 +761,12 @@ export default function App(){
   const [gastos,    setGastos]   = useState(()=>load(KEYS.gastos,     []));
   const [catGastos, setCatG]     = useState(()=>load(KEYS.catGastos,  ICG));
   const [folioNum,  setFolioNum] = useState(()=>load(KEYS.folio,      3));
-  const [proveedores,setProv]    = useState(()=>load(KEYS.proveedores,IPROV));
-  const [arqueos,   setArqueos]  = useState(()=>load(KEYS.arqueos,    []));
+  const [proveedores,setProv]    = useState(()=>normalizeArray(load(KEYS.proveedores,IPROV), IPROV));
+  const proveedoresSafe=normalizeArray(proveedores, IPROV);
+  const [arqueos,   setArqueos]  = useState(()=>normalizeArray(load(KEYS.arqueos,    []), []));
   const [cortesGuardados,setCortesGuardados]=useState(()=>load(KEYS.cortesGuardados,[]));
   const [verHistorialCortes,setVerHistorialCortes]=useState(false);
-  const [precioHistorial,setPrecioHist]=useState(()=>load(KEYS.precioHistorial,[]));
+  const [precioHistorial,setPrecioHist]=useState(()=>normalizeArray(load(KEYS.precioHistorial,[]), []));
   const [config,setConfig]=useState(()=>({...DEFAULT_CONFIG,...(load(KEYS.config,{}))}));
   const [configForm,setConfigForm]=useState(null);
   const [ordenesCompra,setOrdenes]=useState(()=>load(KEYS.ordenesCompra,[]));
@@ -547,6 +776,7 @@ export default function App(){
   const [csvPreview,setCsvPreview]=useState(null);
   const [historialClienteId,setHistorialClienteId]=useState(null);
 
+
   /* ── UI ── */
   const [tab,    setTab]   = useState('Caja');
   const [search, setSearch]= useState('');
@@ -554,6 +784,10 @@ export default function App(){
   const [editing,setEdit]  = useState(null);
   const [toast,  setToast] = useState(null);
   const [confAct,setConf]  = useState(null);
+  const [viewportW,setViewportW]=useState(()=>window.innerWidth||1280);
+  const isMobile=viewportW<900;
+  const [mobileMenuOpen,setMobileMenuOpen]=useState(false);
+
 
   /* ── forms ── */
   const [pForm, setPForm] = useState({nombre:'',categoria:'',stock:'',precio:'',costo:'',codigoBarras:'',foto:'',stockMinimo:'5',proveedorId:''});
@@ -571,6 +805,13 @@ export default function App(){
     denom:{500:0,200:0,100:0,50:0,20:0,10:0,5:0,2:0,1:0,mon:0}});
   const [cpForm,setCpForm]=useState({proveedorId:'',concepto:'',monto:'',fechaVence:'',nota:''});
   const [cpFiltro,setCpFiltro]=useState('pendiente');
+
+  useEffect(()=>{
+    const onResize=()=>setViewportW(window.innerWidth||1280);
+    window.addEventListener('resize',onResize);
+    return()=>window.removeEventListener('resize',onResize);
+  },[]);
+  useEffect(()=>{ if(!isMobile) setMobileMenuOpen(false); },[isMobile]);
 
   /* ── admin auth for delete ── */
   const [pendDel,setPendDel]=useState(null);
@@ -597,6 +838,154 @@ export default function App(){
   const [posNota,setPosNota]=useState(""); /* nota/memo en venta */
   const posItemProd  = useRef(null);
   const posBarRef    = useRef(null);
+  const [cameraScanOpen,setCameraScanOpen]=useState(false);
+  const [cameraSupported,setCameraSupported]=useState(false);
+  const [cameraScanMsg,setCameraScanMsg]=useState('');
+  const [cameraManual,setCameraManual]=useState('');
+  const [cameraScanTarget,setCameraScanTarget]=useState('pos');
+  const [cameraUsingHtml5,setCameraUsingHtml5]=useState(false);
+  const cameraVideoRef=useRef(null);
+  const cameraStreamRef=useRef(null);
+  const cameraLoopRef=useRef(null);
+  const cameraHtml5Ref=useRef(null);
+  const cameraRegionId='aa-camera-region';
+
+  useEffect(()=>{
+    setCameraSupported(typeof navigator!=='undefined' && !!navigator.mediaDevices?.getUserMedia);
+  },[]);
+
+  const ensureHtml5QrLib=useCallback(async()=>{
+    if(typeof window==='undefined') return false;
+    if(window.Html5Qrcode) return true;
+    const existing=document.querySelector('script[data-aa-html5qrcode="1"]');
+    if(existing){
+      await new Promise(resolve=>{
+        if(window.Html5Qrcode) return resolve();
+        existing.addEventListener('load',()=>resolve(),{once:true});
+        existing.addEventListener('error',()=>resolve(),{once:true});
+      });
+      return !!window.Html5Qrcode;
+    }
+    const script=document.createElement('script');
+    script.src='https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js';
+    script.async=true;
+    script.dataset.aaHtml5qrcode='1';
+    document.body.appendChild(script);
+    await new Promise(resolve=>{
+      script.addEventListener('load',()=>resolve(),{once:true});
+      script.addEventListener('error',()=>resolve(),{once:true});
+    });
+    return !!window.Html5Qrcode;
+  },[]);
+
+  function findByBarcode(code){
+    const t=String(code||'').trim();
+    if(!t) return null;
+    const p=safeList(products).find(x=>String(x?.codigoBarras||'').trim()===t);
+    if(p){
+      try{ showToast(`📦 ${p.nombre} — ${fmt(p.precio)}`,C.blue); }catch{}
+      return p;
+    }
+    return null;
+  }
+
+  const stopCameraScan=useCallback(async()=>{
+    try{ if(cameraLoopRef.current) cancelAnimationFrame(cameraLoopRef.current); }catch{}
+    cameraLoopRef.current=null;
+    try{
+      if(cameraHtml5Ref.current){
+        const ref=cameraHtml5Ref.current;
+        cameraHtml5Ref.current=null;
+        try{ await ref.stop(); }catch{}
+        try{ await ref.clear(); }catch{}
+      }
+    }catch{}
+    try{ cameraStreamRef.current?.getTracks?.().forEach(t=>t.stop()); }catch{}
+    cameraStreamRef.current=null;
+    setCameraUsingHtml5(false);
+    setCameraScanOpen(false);
+  },[]);
+
+  const applyScannedCode=useCallback((rawCode)=>{
+    const code=String(rawCode||'').trim();
+    if(!code) return false;
+    if(cameraScanTarget==='product'){
+      setPForm(f=>({...f,codigoBarras:code}));
+      setCameraManual('');
+      setCameraScanMsg(`Código detectado: ${code}`);
+      setTimeout(()=>{ void stopCameraScan(); },180);
+      return true;
+    }
+    const p=findByBarcode(code) || safeList(products).find(x=>(x.codigoBarras||'').trim()===code);
+    if(p){
+      posAddProduct(p);
+      setPosBarcode('');
+      setCameraManual('');
+      setCameraScanMsg(`Producto detectado: ${p.nombre}`);
+      setTimeout(()=>{ void stopCameraScan(); },180);
+      return true;
+    }
+    setCameraScanMsg(`No se encontró el código: ${code}`);
+    return false;
+  },[cameraScanTarget, findByBarcode, products, posAddProduct, stopCameraScan]);
+
+  const startCameraScan=useCallback(async(target='pos')=>{
+    setCameraScanTarget(target);
+    setCameraScanMsg('');
+    setCameraManual('');
+    setCameraScanOpen(true);
+    setCameraUsingHtml5(false);
+    if(!(typeof navigator!=='undefined' && navigator.mediaDevices?.getUserMedia)){
+      setCameraScanMsg('Tu navegador no permite cámara. Usa el campo manual.');
+      return;
+    }
+    const html5Ok=await ensureHtml5QrLib();
+    if(html5Ok && typeof window!=='undefined' && window.Html5Qrcode){
+      try{
+        const scanner=new window.Html5Qrcode(cameraRegionId);
+        cameraHtml5Ref.current=scanner;
+        setCameraUsingHtml5(true);
+        await scanner.start(
+          { facingMode: 'environment' },
+          { fps: 10, qrbox: { width: 220, height: 120 }, aspectRatio: 1.777 },
+          (decodedText)=>{ applyScannedCode(decodedText); },
+          ()=>{}
+        );
+        setCameraScanMsg(target==='product'?'Escaneando código del producto...':'Escaneando producto...');
+        return;
+      }catch(e){
+        console.error('Html5Qrcode:',e);
+        setCameraUsingHtml5(false);
+      }
+    }
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:'environment'}},audio:false});
+      cameraStreamRef.current=stream;
+      if(cameraVideoRef.current){
+        cameraVideoRef.current.srcObject=stream;
+        await cameraVideoRef.current.play().catch(()=>{});
+      }
+      const BD=typeof window!=='undefined' ? window.BarcodeDetector : undefined;
+      if(!BD){
+        setCameraScanMsg('Escaneo automático no disponible aquí. Usa el campo manual.');
+        return;
+      }
+      const detector=new BD({formats:['code_128','ean_13','ean_8','upc_a','upc_e','qr_code']});
+      const tick=async()=>{
+        if(!cameraVideoRef.current || !cameraScanOpen) return;
+        try{
+          const out=await detector.detect(cameraVideoRef.current);
+          const code=out?.[0]?.rawValue;
+          if(code){ applyScannedCode(code); return; }
+        }catch{}
+        cameraLoopRef.current=requestAnimationFrame(tick);
+      };
+      cameraLoopRef.current=requestAnimationFrame(tick);
+      setCameraScanMsg('Alinea el código frente a la cámara.');
+    }catch(e){
+      setCameraScanMsg('No se pudo abrir la cámara. Revisa permisos o usa el campo manual.');
+    }
+  },[applyScannedCode, cameraScanOpen, ensureHtml5QrLib]);
 
   /* ── Cumpleaños notificaciones ── */
   const [cumpleNotis, setCumpleNotis] = useState([]);
@@ -636,111 +1025,94 @@ export default function App(){
   const [mFiltroFecha,setMFiltroFecha]=useState(today());
 
   const fotoRef=useRef(null);
+  const persistReadyRef=useRef(false);
+  const persistIfReady=(k,v)=>{ if(!persistReadyRef.current) return; persistStore(k,v); };
 
   /* auto-save */
  useEffect(() => {
-  const probarSupabase = async () => {
-    if (!supabase) {
-      console.log("❌ Supabase es NULL");
-      return;
-    }
-
-    console.log("✅ Supabase existe");
-
-    const { data, error } = await supabase
-      .from('adornarte_store')
-      .select('*')
-      .limit(1);
-
-    console.log("RESULTADO:", { data, error });
-  };
-
-  probarSupabase();
-}, []);
-useEffect(() => {
-  persistStore(KEYS.products, products);
+  persistIfReady(KEYS.products, products);
 }, [products]);
 
 useEffect(() => {
-  persistStore(KEYS.clientes, clientes);
+  persistIfReady(KEYS.clientes, clientes);
 }, [clientes]);
 
 useEffect(() => {
-  persistStore(KEYS.ventas, ventas);
+  persistIfReady(KEYS.ventas, ventas);
 }, [ventas]);
 
 useEffect(() => {
-  persistStore(KEYS.movimientos, movs);
+  persistIfReady(KEYS.movimientos, movs);
 }, [movs]);
 
 useEffect(() => {
-  persistStore(KEYS.abonos, abonos);
+  persistIfReady(KEYS.abonos, abonos);
 }, [abonos]);
 
 useEffect(() => {
-  persistStore(KEYS.gastos, gastos);
+  persistIfReady(KEYS.gastos, gastos);
 }, [gastos]);
 
 useEffect(() => {
-  persistStore(KEYS.catGastos, catGastos);
+  persistIfReady(KEYS.catGastos, catGastos);
 }, [catGastos]);
 
 useEffect(() => {
-  persistStore(KEYS.folio, folioNum);
+  persistIfReady(KEYS.folio, folioNum);
 }, [folioNum]);
 
 useEffect(() => {
-  persistStore(KEYS.users, users);
+  persistIfReady(KEYS.users, users);
 }, [users]);
 
 useEffect(() => {
-  persistStore(KEYS.proveedores, proveedores);
+  persistIfReady(KEYS.proveedores, proveedores);
 }, [proveedores]);
 
 useEffect(() => {
-  persistStore(KEYS.arqueos, arqueos);
+  persistIfReady(KEYS.arqueos, arqueos);
 }, [arqueos]);
 
 useEffect(() => {
-  persistStore(KEYS.cortesGuardados, cortesGuardados);
+  persistIfReady(KEYS.cortesGuardados, cortesGuardados);
 }, [cortesGuardados]);
 
 useEffect(() => {
-  persistStore(KEYS.cotizaciones, cotizaciones);
+  persistIfReady(KEYS.cotizaciones, cotizaciones);
 }, [cotizaciones]);
 
 useEffect(() => {
-  persistStore(KEYS.cotFolio, cotFolioNum);
+  persistIfReady(KEYS.cotFolio, cotFolioNum);
 }, [cotFolioNum]);
 
 useEffect(() => {
-  persistStore(KEYS.devoluciones, devoluciones);
+  persistIfReady(KEYS.devoluciones, devoluciones);
 }, [devoluciones]);
 
 useEffect(() => {
-  persistStore(KEYS.precioHistorial, precioHistorial);
+  persistIfReady(KEYS.precioHistorial, precioHistorial);
 }, [precioHistorial]);
 
 useEffect(() => {
-  persistStore(KEYS.config, config);
+  persistIfReady(KEYS.config, config);
 }, [config]);
 
 useEffect(() => {
-  persistStore(KEYS.darkMode, isDark);
+  persistIfReady(KEYS.darkMode, isDark);
 }, [isDark]);
 
 useEffect(() => {
-  persistStore(KEYS.ordenesCompra, ordenesCompra);
+  persistIfReady(KEYS.ordenesCompra, ordenesCompra);
 }, [ordenesCompra]);
 
 useEffect(() => {
-  persistStore(KEYS.notificaciones, notifsDismissed);
+  persistIfReady(KEYS.notificaciones, notifsDismissed);
 }, [notifsDismissed]);
   const [apartados,setApartados]=useState(()=>load(KEYS.apartados,[]));
   const [recordatorios,setRecord]=useState(()=>load(KEYS.recordatorios,[]));
   const [conteos,setConteos]=useState(()=>load(KEYS.conteoFisico,[]));
   const [aperturasC,setAperturasC]=useState(()=>load(KEYS.aperturasC,[]));
-  const [cuentasPagar,setCuentasPagar]=useState(()=>load(KEYS.cuentasPagar,[]));
+  const [cuentasPagar,setCuentasPagar]=useState(()=>normalizeArray(load(KEYS.cuentasPagar,[]), []));
   const [editingOC,setEditingOC]=useState(null); /* OC being received */
   /* ── IIFE tab states (moved to top level to respect Rules of Hooks) ── */
   const [ocFiltro,setOcFiltro]=useState('todas');
@@ -775,19 +1147,19 @@ useEffect(() => {
   const [invSort,setInvSort]=useState(''); /* '' | 'categoria' | 'nombre' | 'precio' | 'stock' */
   const [ocEditId,setOcEditId]=useState(null); /* id de OC en edicion */
   useEffect(() => {
-    void persistStore(KEYS.apartados, apartados);
+    void persistIfReady(KEYS.apartados, apartados);
   }, [apartados]);
   useEffect(() => {
-    void persistStore(KEYS.recordatorios, recordatorios);
+    void persistIfReady(KEYS.recordatorios, recordatorios);
   }, [recordatorios]);
   useEffect(() => {
-    void persistStore(KEYS.conteoFisico, conteos);
+    void persistIfReady(KEYS.conteoFisico, conteos);
   }, [conteos]);
   useEffect(() => {
-    void persistStore(KEYS.aperturasC, aperturasC);
+    void persistIfReady(KEYS.aperturasC, aperturasC);
   }, [aperturasC]);
   useEffect(() => {
-    void persistStore(KEYS.cuentasPagar, cuentasPagar);
+    void persistIfReady(KEYS.cuentasPagar, cuentasPagar);
   }, [cuentasPagar]);
 
   /* ── SUPABASE — carga inicial al arrancar ─────────────────── */
@@ -799,6 +1171,76 @@ useEffect(() => {
   const [sbBackupsList, setSbBackupsList]=useState([]);
   const [sbBackupsLoading, setSbBackupsLoading]=useState(false);
   const [sbAuthUser,   setSbAuthUser   ]=useState(null);
+  const applyRemoteCollections=async()=>{
+    const [rp,rc,rv,ra]=await Promise.all([
+      loadCollectionTable(KEYS.products).catch(()=>({items:null,updatedAt:0})),
+      loadCollectionTable(KEYS.clientes).catch(()=>({items:null,updatedAt:0})),
+      loadCollectionTable(KEYS.ventas).catch(()=>({items:null,updatedAt:0})),
+      loadCollectionTable(KEYS.abonos).catch(()=>({items:null,updatedAt:0})),
+    ]);
+    if(Array.isArray(rp.items)) {
+      setProducts(rp.items);
+      try{ await idbSet(KEYS.products,rp.items); }catch{}
+      try{ localStorage.setItem(KEYS.products, JSON.stringify(rp.items)); }catch{}
+      try{ setSyncStamp(KEYS.products, rp.updatedAt||Date.now()); }catch{}
+    }
+    if(Array.isArray(rc.items)) {
+      setClientes(rc.items);
+      try{ localStorage.setItem(KEYS.clientes, JSON.stringify(rc.items)); }catch{}
+      try{ setSyncStamp(KEYS.clientes, rc.updatedAt||Date.now()); }catch{}
+    }
+    if(Array.isArray(rv.items)) {
+      setVentas(rv.items);
+      try{ localStorage.setItem(KEYS.ventas, JSON.stringify(rv.items)); }catch{}
+      try{ setSyncStamp(KEYS.ventas, rv.updatedAt||Date.now()); }catch{}
+    }
+    if(Array.isArray(ra.items)) {
+      setAbonos(ra.items);
+      try{ localStorage.setItem(KEYS.abonos, JSON.stringify(ra.items)); }catch{}
+      try{ setSyncStamp(KEYS.abonos, ra.updatedAt||Date.now()); }catch{}
+    }
+  };
+
+  const applyStoreRemoteKey=async(key, rawData, updatedAt)=>{
+    const parsed=unwrapStoredData(rawData).value;
+    const stamp=updatedAt||Date.now();
+    const localStamp = getSyncStamp(key)||0;
+    const mirror=(setter, value, normalizeFn=null)=>{
+      if(localStamp && stamp && stamp < localStamp) return null;
+      const next=normalizeFn ? normalizeFn(value) : value;
+      setter(next);
+      try{ localStorage.setItem(key, JSON.stringify(next)); }catch{}
+      try{ setSyncStamp(key, stamp); }catch{}
+      return next;
+    };
+    switch(key){
+      case KEYS.movimientos: return mirror(setMovs, safeList(parsed));
+      case KEYS.gastos: return mirror(setGastos, safeList(parsed));
+      case KEYS.catGastos: return mirror(setCatG, safeList(parsed));
+      case KEYS.folio: return mirror(setFolioNum, parsed);
+      case KEYS.users: return mirror(setUsers, safeList(parsed));
+      case KEYS.proveedores: return mirror(setProv, parsed, v=>normalizeArray(v, IPROV));
+      case KEYS.arqueos: return mirror(setArqueos, safeList(parsed));
+      case KEYS.cortesGuardados: return mirror(setCortesGuardados, safeList(parsed));
+      case KEYS.cotizaciones: return mirror(setCotiz, safeList(parsed));
+      case KEYS.cotFolio: return mirror(setCotFolioN, parsed);
+      case KEYS.devoluciones: return mirror(setDevs, safeList(parsed));
+      case KEYS.precioHistorial: return mirror(setPrecioHist, safeList(parsed));
+      case KEYS.config: {
+        const next={...DEFAULT_CONFIG,...config,...(parsed||{}),respaldoAuto:parsed?.respaldoAuto||config?.respaldoAuto||DEFAULT_CONFIG.respaldoAuto};
+        return mirror(setConfig, next);
+      }
+      case KEYS.darkMode: return mirror(setIsDark, !!parsed);
+      case KEYS.ordenesCompra: return mirror(setOrdenes, safeList(parsed));
+      case KEYS.notificaciones: return mirror(setNotifsDismissed, safeList(parsed));
+      case KEYS.apartados: return mirror(setApartados, safeList(parsed));
+      case KEYS.recordatorios: return mirror(setRecord, safeList(parsed));
+      case KEYS.conteoFisico: return mirror(setConteos, safeList(parsed));
+      case KEYS.aperturasC: return mirror(setAperturasC, safeList(parsed));
+      case KEYS.cuentasPagar: return mirror(setCuentasPagar, normalizeArray(parsed, []));
+      default: return null;
+    }
+  };
 
   /* ── logActividad — registra en Supabase (fire-and-forget) ── */
   const logActividad=(tipo,desc,datos={},usuario='')=>{
@@ -812,50 +1254,47 @@ useEffect(() => {
 
   useEffect(()=>{
     /* Timeout de seguridad absoluto — siempre avanza al login en máx 3s */
-    const safetyTimer=setTimeout(()=>{ _sbReady=true; setDbLoading(false); },10000);
+    const safetyTimer=setTimeout(()=>{ _sbReady=true; persistReadyRef.current=true; setDbLoading(false); },10000);
     const loadAll=async()=>{
       try{
         if(!supabase)throw new Error('Supabase no configurado');
         const res=await Promise.race([
-          supabase.from('adornarte_store').select('key,data'),
-          new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),8000))
+          supabase.from('adornarte_store').select('key,data').neq('key',KEYS.products),
+          new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),15000))
         ]);
         const {data,error}=res;
         if(error)throw error;
         const m={};
-        (data||[]).forEach(r=>{m[r.key]=r.data;});
-        /* Aplica cada colección si existe en Supabase */
-        if(m[KEYS.products])       setProducts(m[KEYS.products]);
-        if(m[KEYS.clientes])       setClientes(m[KEYS.clientes]);
-        if(m[KEYS.ventas])         setVentas(m[KEYS.ventas]);
-        if(m[KEYS.movimientos])    setMovs(m[KEYS.movimientos]);
-        if(m[KEYS.abonos])         setAbonos(m[KEYS.abonos]);
-        if(m[KEYS.gastos])         setGastos(m[KEYS.gastos]);
-        if(m[KEYS.catGastos])      setCatG(m[KEYS.catGastos]);
-        if(m[KEYS.folio]!==undefined) setFolioNum(m[KEYS.folio]);
-        if(m[KEYS.users])          setUsers(m[KEYS.users]);
-        if(m[KEYS.proveedores])    setProv(m[KEYS.proveedores]);
-        if(m[KEYS.arqueos])        setArqueos(m[KEYS.arqueos]);
-        if(m[KEYS.cortesGuardados])setCortesGuardados(m[KEYS.cortesGuardados]);
-        if(m[KEYS.cotizaciones])   setCotiz(m[KEYS.cotizaciones]);
-        if(m[KEYS.cotFolio]!==undefined) setCotFolioN(m[KEYS.cotFolio]);
-        if(m[KEYS.devoluciones])   setDevs(m[KEYS.devoluciones]);
-        if(m[KEYS.precioHistorial])setPrecioHist(m[KEYS.precioHistorial]);
-        if(m[KEYS.config])         setConfig(c=>({...c,...m[KEYS.config]}));
-        if(m[KEYS.darkMode]!==undefined) setIsDark(m[KEYS.darkMode]);
-        if(m[KEYS.ordenesCompra])  setOrdenes(m[KEYS.ordenesCompra]);
-        if(m[KEYS.notificaciones]) setNotifsDismissed(m[KEYS.notificaciones]);
-        if(m[KEYS.apartados])      setApartados(m[KEYS.apartados]);
-        if(m[KEYS.recordatorios])  setRecord(m[KEYS.recordatorios]);
-        if(m[KEYS.conteoFisico])   setConteos(m[KEYS.conteoFisico]);
-        if(m[KEYS.aperturasC])     setAperturasC(m[KEYS.aperturasC]);
-        if(m[KEYS.cuentasPagar])   setCuentasPagar(m[KEYS.cuentasPagar]);
+        (data||[]).forEach(r=>{m[r.key]=unwrapStoredData(r.data);});
+        const remoteWins=(key)=>((m[key]?.updatedAt||0) >= getSyncStamp(key));
+        await applyRemoteCollections();
+        if(m[KEYS.movimientos] && remoteWins(KEYS.movimientos)) await applyStoreRemoteKey(KEYS.movimientos, m[KEYS.movimientos], m[KEYS.movimientos].updatedAt);
+        if(m[KEYS.gastos] && remoteWins(KEYS.gastos))           await applyStoreRemoteKey(KEYS.gastos, m[KEYS.gastos], m[KEYS.gastos].updatedAt);
+        if(m[KEYS.catGastos] && remoteWins(KEYS.catGastos))     await applyStoreRemoteKey(KEYS.catGastos, m[KEYS.catGastos], m[KEYS.catGastos].updatedAt);
+        if(m[KEYS.folio]!==undefined && remoteWins(KEYS.folio)) await applyStoreRemoteKey(KEYS.folio, m[KEYS.folio], m[KEYS.folio].updatedAt);
+        if(m[KEYS.users] && remoteWins(KEYS.users))             await applyStoreRemoteKey(KEYS.users, m[KEYS.users], m[KEYS.users].updatedAt);
+        if(m[KEYS.proveedores] && remoteWins(KEYS.proveedores)) await applyStoreRemoteKey(KEYS.proveedores, m[KEYS.proveedores], m[KEYS.proveedores].updatedAt);
+        if(m[KEYS.arqueos] && remoteWins(KEYS.arqueos))         await applyStoreRemoteKey(KEYS.arqueos, m[KEYS.arqueos], m[KEYS.arqueos].updatedAt);
+        if(m[KEYS.cortesGuardados] && remoteWins(KEYS.cortesGuardados)) await applyStoreRemoteKey(KEYS.cortesGuardados, m[KEYS.cortesGuardados], m[KEYS.cortesGuardados].updatedAt);
+        if(m[KEYS.cotizaciones] && remoteWins(KEYS.cotizaciones)) await applyStoreRemoteKey(KEYS.cotizaciones, m[KEYS.cotizaciones], m[KEYS.cotizaciones].updatedAt);
+        if(m[KEYS.cotFolio]!==undefined && remoteWins(KEYS.cotFolio)) await applyStoreRemoteKey(KEYS.cotFolio, m[KEYS.cotFolio], m[KEYS.cotFolio].updatedAt);
+        if(m[KEYS.devoluciones] && remoteWins(KEYS.devoluciones)) await applyStoreRemoteKey(KEYS.devoluciones, m[KEYS.devoluciones], m[KEYS.devoluciones].updatedAt);
+        if(m[KEYS.precioHistorial] && remoteWins(KEYS.precioHistorial)) await applyStoreRemoteKey(KEYS.precioHistorial, m[KEYS.precioHistorial], m[KEYS.precioHistorial].updatedAt);
+        if(m[KEYS.config] && remoteWins(KEYS.config))         await applyStoreRemoteKey(KEYS.config, m[KEYS.config], m[KEYS.config].updatedAt);
+        if(m[KEYS.darkMode]!==undefined && remoteWins(KEYS.darkMode)) await applyStoreRemoteKey(KEYS.darkMode, m[KEYS.darkMode], m[KEYS.darkMode].updatedAt);
+        if(m[KEYS.ordenesCompra] && remoteWins(KEYS.ordenesCompra))  await applyStoreRemoteKey(KEYS.ordenesCompra, m[KEYS.ordenesCompra], m[KEYS.ordenesCompra].updatedAt);
+        if(m[KEYS.notificaciones] && remoteWins(KEYS.notificaciones)) await applyStoreRemoteKey(KEYS.notificaciones, m[KEYS.notificaciones], m[KEYS.notificaciones].updatedAt);
+        if(m[KEYS.apartados] && remoteWins(KEYS.apartados))      await applyStoreRemoteKey(KEYS.apartados, m[KEYS.apartados], m[KEYS.apartados].updatedAt);
+        if(m[KEYS.recordatorios] && remoteWins(KEYS.recordatorios))  await applyStoreRemoteKey(KEYS.recordatorios, m[KEYS.recordatorios], m[KEYS.recordatorios].updatedAt);
+        if(m[KEYS.conteoFisico] && remoteWins(KEYS.conteoFisico))   await applyStoreRemoteKey(KEYS.conteoFisico, m[KEYS.conteoFisico], m[KEYS.conteoFisico].updatedAt);
+        if(m[KEYS.aperturasC] && remoteWins(KEYS.aperturasC))     await applyStoreRemoteKey(KEYS.aperturasC, m[KEYS.aperturasC], m[KEYS.aperturasC].updatedAt);
+        if(m[KEYS.cuentasPagar] && remoteWins(KEYS.cuentasPagar))   await applyStoreRemoteKey(KEYS.cuentasPagar, m[KEYS.cuentasPagar], m[KEYS.cuentasPagar].updatedAt);
       }catch(e){
         console.warn('Supabase no disponible, usando datos locales:',e.message);
         setDbError(e.message);
       }finally{
         clearTimeout(safetyTimer);
-        setTimeout(()=>{ _sbReady=true; setDbLoading(false); },300);
+        setTimeout(()=>{ _sbReady=true; persistReadyRef.current=true; setDbLoading(false); },300);
       }
     };
     loadAll();
@@ -885,36 +1324,34 @@ useEffect(() => {
     setSbOnline(null);
     try{
       const res=await Promise.race([
-        supabase.from('adornarte_store').select('key,data'),
-        new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),8000))
+        supabase.from('adornarte_store').select('key,data').neq('key',KEYS.products),
+        new Promise((_,rej)=>setTimeout(()=>rej(new Error('timeout')),15000))
       ]);
       const {data,error}=res;
       if(error)throw error;
       const m={};
-      (data||[]).forEach(r=>{m[r.key]=r.data;});
-      if(m[KEYS.products])       setProducts(m[KEYS.products]);
-      if(m[KEYS.clientes])       setClientes(m[KEYS.clientes]);
-      if(m[KEYS.ventas])         setVentas(m[KEYS.ventas]);
-      if(m[KEYS.movimientos])    setMovs(m[KEYS.movimientos]);
-      if(m[KEYS.abonos])         setAbonos(m[KEYS.abonos]);
-      if(m[KEYS.gastos])         setGastos(m[KEYS.gastos]);
-      if(m[KEYS.catGastos])      setCatG(m[KEYS.catGastos]);
-      if(m[KEYS.folio]!==undefined) setFolioNum(m[KEYS.folio]);
-      if(m[KEYS.users])          setUsers(m[KEYS.users]);
-      if(m[KEYS.proveedores])    setProv(m[KEYS.proveedores]);
-      if(m[KEYS.arqueos])        setArqueos(m[KEYS.arqueos]);
-      if(m[KEYS.cortesGuardados])setCortesGuardados(m[KEYS.cortesGuardados]);
-      if(m[KEYS.cotizaciones])   setCotiz(m[KEYS.cotizaciones]);
-      if(m[KEYS.cotFolio]!==undefined) setCotFolioN(m[KEYS.cotFolio]);
-      if(m[KEYS.devoluciones])   setDevs(m[KEYS.devoluciones]);
-      if(m[KEYS.config])         setConfig(c=>({...c,...m[KEYS.config]}));
-      if(m[KEYS.darkMode]!==undefined) setIsDark(m[KEYS.darkMode]);
-      if(m[KEYS.ordenesCompra])  setOrdenes(m[KEYS.ordenesCompra]);
-      if(m[KEYS.apartados])      setApartados(m[KEYS.apartados]);
-      if(m[KEYS.recordatorios])  setRecord(m[KEYS.recordatorios]);
-      if(m[KEYS.conteoFisico])   setConteos(m[KEYS.conteoFisico]);
-      if(m[KEYS.aperturasC])     setAperturasC(m[KEYS.aperturasC]);
-      if(m[KEYS.cuentasPagar])   setCuentasPagar(m[KEYS.cuentasPagar]);
+      (data||[]).forEach(r=>{m[r.key]=unwrapStoredData(r.data);});
+      const remoteWins=(key)=>((m[key]?.updatedAt||0) >= getSyncStamp(key));
+      await applyRemoteCollections();
+      if(m[KEYS.movimientos] && remoteWins(KEYS.movimientos)) await applyStoreRemoteKey(KEYS.movimientos, m[KEYS.movimientos], m[KEYS.movimientos].updatedAt);
+      if(m[KEYS.gastos] && remoteWins(KEYS.gastos))           await applyStoreRemoteKey(KEYS.gastos, m[KEYS.gastos], m[KEYS.gastos].updatedAt);
+      if(m[KEYS.catGastos] && remoteWins(KEYS.catGastos))     await applyStoreRemoteKey(KEYS.catGastos, m[KEYS.catGastos], m[KEYS.catGastos].updatedAt);
+      if(m[KEYS.folio]!==undefined && remoteWins(KEYS.folio)) await applyStoreRemoteKey(KEYS.folio, m[KEYS.folio], m[KEYS.folio].updatedAt);
+      if(m[KEYS.users] && remoteWins(KEYS.users))             await applyStoreRemoteKey(KEYS.users, m[KEYS.users], m[KEYS.users].updatedAt);
+      if(m[KEYS.proveedores] && remoteWins(KEYS.proveedores)) await applyStoreRemoteKey(KEYS.proveedores, m[KEYS.proveedores], m[KEYS.proveedores].updatedAt);
+      if(m[KEYS.arqueos] && remoteWins(KEYS.arqueos))         await applyStoreRemoteKey(KEYS.arqueos, m[KEYS.arqueos], m[KEYS.arqueos].updatedAt);
+      if(m[KEYS.cortesGuardados] && remoteWins(KEYS.cortesGuardados)) await applyStoreRemoteKey(KEYS.cortesGuardados, m[KEYS.cortesGuardados], m[KEYS.cortesGuardados].updatedAt);
+      if(m[KEYS.cotizaciones] && remoteWins(KEYS.cotizaciones)) await applyStoreRemoteKey(KEYS.cotizaciones, m[KEYS.cotizaciones], m[KEYS.cotizaciones].updatedAt);
+      if(m[KEYS.cotFolio]!==undefined && remoteWins(KEYS.cotFolio)) await applyStoreRemoteKey(KEYS.cotFolio, m[KEYS.cotFolio], m[KEYS.cotFolio].updatedAt);
+      if(m[KEYS.devoluciones] && remoteWins(KEYS.devoluciones)) await applyStoreRemoteKey(KEYS.devoluciones, m[KEYS.devoluciones], m[KEYS.devoluciones].updatedAt);
+      if(m[KEYS.config] && remoteWins(KEYS.config))         await applyStoreRemoteKey(KEYS.config, m[KEYS.config], m[KEYS.config].updatedAt);
+      if(m[KEYS.darkMode]!==undefined && remoteWins(KEYS.darkMode)) await applyStoreRemoteKey(KEYS.darkMode, m[KEYS.darkMode], m[KEYS.darkMode].updatedAt);
+      if(m[KEYS.ordenesCompra] && remoteWins(KEYS.ordenesCompra))  await applyStoreRemoteKey(KEYS.ordenesCompra, m[KEYS.ordenesCompra], m[KEYS.ordenesCompra].updatedAt);
+      if(m[KEYS.apartados] && remoteWins(KEYS.apartados))      await applyStoreRemoteKey(KEYS.apartados, m[KEYS.apartados], m[KEYS.apartados].updatedAt);
+      if(m[KEYS.recordatorios] && remoteWins(KEYS.recordatorios))  await applyStoreRemoteKey(KEYS.recordatorios, m[KEYS.recordatorios], m[KEYS.recordatorios].updatedAt);
+      if(m[KEYS.conteoFisico] && remoteWins(KEYS.conteoFisico))   await applyStoreRemoteKey(KEYS.conteoFisico, m[KEYS.conteoFisico], m[KEYS.conteoFisico].updatedAt);
+      if(m[KEYS.aperturasC] && remoteWins(KEYS.aperturasC))     await applyStoreRemoteKey(KEYS.aperturasC, m[KEYS.aperturasC], m[KEYS.aperturasC].updatedAt);
+      if(m[KEYS.cuentasPagar] && remoteWins(KEYS.cuentasPagar))   await applyStoreRemoteKey(KEYS.cuentasPagar, m[KEYS.cuentasPagar], m[KEYS.cuentasPagar].updatedAt);
       setSbOnline(true);
       showToast('✅ Reconectado con Supabase',C.green);
     }catch(e){
@@ -930,26 +1367,31 @@ useEffect(() => {
     if(!supabase || _sbChannel)return;
     _sbChannel=supabase
       .channel('adornarte-sync')
-      .on('postgres_changes',{event:'UPDATE',schema:'public',table:'adornarte_store'},payload=>{
+      .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_store'},payload=>{
         const {key,data}=payload.new||{};
         if(!key||data===undefined)return;
-        switch(key){
-          case KEYS.products:    setProducts(data);     break;
-          case KEYS.clientes:    setClientes(data);     break;
-          case KEYS.ventas:      setVentas(data);       break;
-          case KEYS.movimientos: setMovs(data);         break;
-          case KEYS.abonos:      setAbonos(data);       break;
-          case KEYS.gastos:      setGastos(data);       break;
-          case KEYS.catGastos:   setCatG(data);         break;
-          case KEYS.proveedores: setProv(data);         break;
-          case KEYS.cotizaciones:setCotiz(data);        break;
-          case KEYS.devoluciones:setDevs(data);         break;
-          case KEYS.config:      setConfig(c=>({...c,...data})); break;
-          default: break;
-        }
+        void applyStoreRemoteKey(key, data, unwrapStoredData(data).updatedAt||Date.now());
       })
       .subscribe(status=>{ if(status==='SUBSCRIBED') setSbOnline(true); });
     return()=>{ if(_sbChannel){supabase.removeChannel(_sbChannel);_sbChannel=null;} };
+  },[]); // eslint-disable-line
+
+
+  useEffect(()=>{
+    if(!supabase) return;
+    const prodCh=supabase.channel('adornarte-products-sync')
+      .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_products'},()=>{ void loadCollectionTable(KEYS.products).then(async r=>{ if(Array.isArray(r.items)){ setProducts(r.items); try{ await idbSet(KEYS.products,r.items); }catch{} try{ localStorage.setItem(KEYS.products, JSON.stringify(r.items)); }catch{} try{ setSyncStamp(KEYS.products, r.updatedAt||Date.now()); }catch{} } }).catch(()=>{}); })
+      .subscribe();
+    const salesCh=supabase.channel('adornarte-sales-sync')
+      .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_sales'},()=>{ void loadCollectionTable(KEYS.ventas).then(r=>{ if(Array.isArray(r.items)){ setVentas(r.items); try{ localStorage.setItem(KEYS.ventas, JSON.stringify(r.items)); }catch{} try{ setSyncStamp(KEYS.ventas, r.updatedAt||Date.now()); }catch{} } }).catch(()=>{}); })
+      .subscribe();
+    const custCh=supabase.channel('adornarte-customers-sync')
+      .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_customers'},()=>{ void loadCollectionTable(KEYS.clientes).then(r=>{ if(Array.isArray(r.items)){ setClientes(r.items); try{ localStorage.setItem(KEYS.clientes, JSON.stringify(r.items)); }catch{} try{ setSyncStamp(KEYS.clientes, r.updatedAt||Date.now()); }catch{} } }).catch(()=>{}); })
+      .subscribe();
+    const abonosCh=supabase.channel('adornarte-abonos-sync')
+      .on('postgres_changes',{event:'*',schema:'public',table:'adornarte_abonos'},()=>{ void loadCollectionTable(KEYS.abonos).then(r=>{ if(Array.isArray(r.items)){ setAbonos(r.items); try{ localStorage.setItem(KEYS.abonos, JSON.stringify(r.items)); }catch{} try{ setSyncStamp(KEYS.abonos, r.updatedAt||Date.now()); }catch{} } }).catch(()=>{}); })
+      .subscribe();
+    return()=>{ try{supabase.removeChannel(prodCh);}catch{} try{supabase.removeChannel(salesCh);}catch{} try{supabase.removeChannel(custCh);}catch{} try{supabase.removeChannel(abonosCh);}catch{} };
   },[]); // eslint-disable-line
 
   /* ── SUPABASE AUTH: recuperar sesión al recargar ─────────── */
@@ -995,7 +1437,7 @@ useEffect(() => {
 
   /* helper foto ticket WhatsApp */
   const compartirTicketWhatsApp=(venta)=>{
-    const cli=clientes.find(c=>c.id===venta.clienteId);
+    const cli=safeList(clientes).find(c=>c.id===venta.clienteId);
     const wa=config.whatsappNumero||(cli?.telefono?.replace(/[^0-9]/g,'')?`504${cli.telefono.replace(/[^0-9]/g,'')}`:null);
     const lineas=venta.items.map(it=>`  • ${it.cantidad}× ${it.productoNombre} — L ${it.subtotal.toLocaleString('es-HN',{minimumFractionDigits:2})}`).join('\n');
     const pagText=venta.pagos?.length>1?venta.pagos.map(p=>`${p.metodo}: L ${p.monto.toLocaleString('es-HN',{minimumFractionDigits:2})}`).join(', '):venta.formaPago;
@@ -1006,7 +1448,7 @@ useEffect(() => {
   };
   useEffect(()=>{
     if(!session)return;
-    const hoy=clientes.filter(c=>isBirthdayToday(c.fechaNacimiento));
+    const hoy=safeList(clientes).filter(c=>isBirthdayToday(c.fechaNacimiento));
     setCumpleNotis(hoy);setCumpleDismissed([]);
   },[session?.id]); // eslint-disable-line
 
@@ -1033,36 +1475,36 @@ useEffect(() => {
   const getLoyalty=totalCompras=>{
     return LOYALTY_LEVELS.find(l=>totalCompras>=l.min&&totalCompras<=l.max)||LOYALTY_LEVELS[0];
   };
-  const getClienteTotalCompras=c=>ventas.filter(v=>v.clienteId===c.id).reduce((a,v)=>a+v.total,0);
+  const getClienteTotalCompras=c=>safeList(ventas).filter(v=>v.clienteId===c.id).reduce((a,v)=>a+v.total,0);
 
   /* ── CENTRO DE NOTIFICACIONES ── */
-  const alertasStock=useMemo(()=>products.filter(p=>(p.stockMinimo||0)>0&&stockTotal(p)<=p.stockMinimo),[products]);
+  const alertasStock=useMemo(()=>safeList(products).filter(p=>(p.stockMinimo||0)>0&&stockTotal(p)<=p.stockMinimo),[products]);
   const allNotifs=useMemo(()=>{
     const n=[];
     /* cumpleaños */
-    clientes.forEach(c=>{if(isBirthdayToday(c.fechaNacimiento))n.push({id:`cumple_${c.id}`,tipo:'cumple',icon:'🎂',titulo:`Cumpleaños: ${c.nombre}`,sub:'¡Hoy es su cumpleaños!',color:C.amber,onClick:()=>setTab('Clientes')});});
+    safeList(clientes).forEach(c=>{if(isBirthdayToday(c.fechaNacimiento))n.push({id:`cumple_${c.id}`,tipo:'cumple',icon:'🎂',titulo:`Cumpleaños: ${c.nombre}`,sub:'¡Hoy es su cumpleaños!',color:C.amber,onClick:()=>setTab('Clientes')});});
     /* stock bajo */
-    alertasStock.forEach(p=>n.push({id:`stock_${p.id}`,tipo:'stock',icon:'⚠️',titulo:`Stock bajo: ${p.nombre}`,sub:`${stockTotal(p)} unidades restantes`,color:C.red,onClick:()=>setTab('Inventario')}));
+    safeList(alertasStock).forEach(p=>n.push({id:`stock_${p.id}`,tipo:'stock',icon:'⚠️',titulo:`Stock bajo: ${p.nombre}`,sub:`${stockTotal(p)} unidades restantes`,color:C.red,onClick:()=>setTab('Inventario')}));
     /* créditos vencidos (>30 días sin abono) */
-    ventas.filter(v=>v.tipo==='credito'&&v.estado==='pendiente').forEach(v=>{
-      const last=[...abonos.filter(a=>a.ventaId===v.id)].sort((a,b)=>b.fecha.localeCompare(a.fecha))[0];
+    safeList(ventas).filter(v=>v?.tipo==='credito'&&v?.estado==='pendiente').forEach(v=>{
+      const last=[...safeList(abonos).filter(a=>a?.ventaId===v.id)].sort((a,b)=>b.fecha.localeCompare(a.fecha))[0];
       const refDate=last?last.fecha:v.fecha;
       const dias=Math.floor((new Date()-new Date(refDate+'T12:00:00'))/(1000*60*60*24));
       if(dias>30)n.push({id:`cred_${v.id}`,tipo:'credito',icon:'💳',titulo:`Crédito vencido: ${v.clienteNombre}`,sub:`${v.folio} — ${dias} días sin abono — Saldo ${fmt(v.saldo)}`,color:C.amber,onClick:()=>setTab('Creditos')});
     });
     /* recordatorios pendientes para hoy */
-    recordatorios.filter(r=>!r.completado&&r.fecha<=today()).forEach(r=>{
+    safeList(recordatorios).filter(r=>!r?.completado&&r?.fecha<=today()).forEach(r=>{
       n.push({id:`rec_${r.id}`,tipo:'recordatorio',icon:'📅',titulo:r.titulo,sub:`${r.tipo}${r.clienteNombre?' · '+r.clienteNombre:''}`,color:C.blue,onClick:()=>setTab('Recordatorios')});
     });
     /* apartados con entrega vencida */
-    apartados.filter(a=>a.estado==='pendiente'&&a.fechaEntrega&&a.fechaEntrega<today()).forEach(a=>{
+    safeList(apartados).filter(a=>a?.estado==='pendiente'&&a?.fechaEntrega&&a?.fechaEntrega<today()).forEach(a=>{
       n.push({id:`apt_${a.id}`,tipo:'apartado',icon:'🔒',titulo:`Apartado vencido: ${a.clienteNombre}`,sub:`${a.folio} — ${a.productoNombre}`,color:C.purple,onClick:()=>setTab('Apartados')});
     });
     return n;
   },[clientes,alertasStock,ventas,abonos,recordatorios,apartados]); // eslint-disable-line
-  const pendingNotifs=allNotifs.filter(n=>!notifsDismissed.includes(n.id));
-  const dismissNotif=id=>setNotifsDismissed(ds=>[...ds,id]);
-  const dismissAllNotifs=()=>setNotifsDismissed(allNotifs.map(n=>n.id));
+  const pendingNotifs=safeList(allNotifs).filter(n=>!safeList(notifsDismissed).includes(n.id));
+  const dismissNotif=id=>setNotifsDismissed(ds=>[...safeList(ds),id]);
+  const dismissAllNotifs=()=>setNotifsDismissed(safeList(allNotifs).map(n=>n.id));
 
   /* ── IMPORTAR CSV DE PRODUCTOS ── */
   const parseCsvProducts=text=>{
@@ -1102,7 +1544,7 @@ useEffect(() => {
   const saveOrdenCompra=()=>{
     if(!ordenForm.proveedorId)return showToast('Selecciona un proveedor',C.red);
     if(!ordenForm.items.length)return showToast('Agrega al menos un producto',C.red);
-    const prov=proveedores.find(p=>p.id===+ordenForm.proveedorId);
+    const prov=proveedoresSafe.find(p=>p.id===+ordenForm.proveedorId);
     const total=ordenForm.items.reduce((a,i)=>a+(i.cantidad*(i.precioUnitario||0)),0);
     const orden={id:uid(),folio:`OC-${String(ordenesCompra.length+1).padStart(4,'0')}`,fecha:ordenForm.fecha,proveedorId:+ordenForm.proveedorId,proveedorNombre:prov?.nombre||'',items:[...ordenForm.items],nota:ordenForm.nota,total,estado:'pendiente',cajero:session?.nombre||''};
     setOrdenes(os=>[orden,...os]);
@@ -1111,7 +1553,7 @@ useEffect(() => {
     closeModal();
   };
   const printOrdenCompra=orden=>{
-    const prov=proveedores.find(p=>p.id===orden.proveedorId)||{nombre:orden.proveedorNombre,telefono:'',email:''};
+    const prov=proveedoresSafe.find(p=>p.id===orden.proveedorId)||{nombre:orden.proveedorNombre,telefono:'',email:''};
     const rows=orden.items.map((it,i)=>`<tr style="background:${i%2===0?'#faf9fb':'#fff'}"><td style="padding:8px 10px">${i+1}</td><td style="padding:8px 10px;font-weight:600">${it.nombre}</td><td style="padding:8px 10px;text-align:center">${it.cantidad}</td><td style="padding:8px 10px;text-align:right">L ${(+it.precioUnitario||0).toLocaleString('es-HN',{minimumFractionDigits:2})}</td><td style="padding:8px 10px;text-align:right;font-weight:700">L ${((+it.precioUnitario||0)*it.cantidad).toLocaleString('es-HN',{minimumFractionDigits:2})}</td></tr>`).join('');
     const html=`<!DOCTYPE html><html><head><meta charset="utf-8"><title>${orden.folio}</title>
 <style>*{box-sizing:border-box;margin:0;padding:0}body{font-family:'Segoe UI',sans-serif;padding:30px;max-width:680px;margin:0 auto;color:#1e1230}
@@ -1146,7 +1588,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
       const d=new Date(now.getFullYear(),now.getMonth()-5+i,1);
       const yyyy=d.getFullYear(),mm=String(d.getMonth()+1).padStart(2,'0');
       const prefix=`${yyyy}-${mm}`;
-      const mv=ventas.filter(v=>v.fecha.startsWith(prefix));
+      const mv=safeList(ventas).filter(v=>v.fecha.startsWith(prefix));
       const mg=gastos.filter(g=>g.fecha.startsWith(prefix));
       const totalV=mv.reduce((a,v)=>a+v.total,0);
       const totalCosto=mv.reduce((a,v)=>a+(v.totalCosto||0),0);
@@ -1180,14 +1622,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
     if(file.size>800000){showToast('Imagen muy grande (máx 800KB)',C.red);return;}
     const r=new FileReader();r.onload=ev=>setPForm(f=>({...f,foto:ev.target.result}));r.readAsDataURL(file);
   };
-
   /* ── BARCODE ── */
-  const findByBarcode=code=>{
-    const t=code.trim();
-    const p=products.find(x=>x.codigoBarras===t);
-    if(p){showToast(`📦 ${p.nombre} — ${fmt(p.precio)}`,C.blue);return p;}
-    showToast(`Código "${t}" no encontrado ❌`,C.amber);return null;
-  };
 
   /* ── POS computed ── */
   const posSubtotalBruto=useMemo(()=>posItems.reduce((a,i)=>a+i.precio*i.cantidad,0),[posItems]);
@@ -1196,7 +1631,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
     if(posDescTipo==='pct') return Math.round(posSubtotalBruto*(+posDesc/100)*100)/100;
     return Math.min(+posDesc,posSubtotalBruto);
   },[posItems,posDesc,posDescTipo,posSubtotalBruto]);
-  const posCliObj=useMemo(()=>clientes.find(c=>c.id===+posCliente)||null,[posCliente,clientes]);
+  const posCliObj=useMemo(()=>safeList(clientes).find(c=>c.id===+posCliente)||null,[posCliente,clientes]);
   const posPuntosDisp=posCliObj?.puntos||0;
   const posPuntosDesc=useMemo(()=>{
     if(!posUsePuntos||!posCliObj)return 0;
@@ -1215,7 +1650,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   },[cotItems,cotDesc,cotDescTipo,cotSubtotal]);
   const cotTotal=useMemo(()=>cotSubtotal-cotDescMonto,[cotSubtotal,cotDescMonto]);
 
-  const posAddProduct=(prod,varianteId=null)=>{
+  function posAddProduct(prod,varianteId=null){
     /* si tiene variantes y no se eligió una, abrir picker */
     if((prod.variantes||[]).length>0&&varianteId===null){
       setPosVariantProd(prod);setModal('variantPicker');return;
@@ -1227,16 +1662,16 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
     if(enC>=stockDisp){showToast(`Stock máximo${variante?` (${variante.nombre})`:''}: ${stockDisp}`,C.amber);return;}
     const nomCompleto=variante?`${prod.nombre} — ${variante.nombre}`:prod.nombre;
     /* precio especial del cliente si existe */
-    const cliObj=clientes.find(c=>c.id===+posCliente);
+    const cliObj=safeList(clientes).find(c=>c.id===+posCliente);
     const pesp=(cliObj?.preciosEspeciales||[]).find(p=>p.productoId===prod.id);
     const precioFinal=pesp?pesp.precio:prod.precio;
     const ex=posItems.find(i=>i.itemKey===itemKey);
     if(ex){setPosItems(its=>its.map(i=>i.itemKey===itemKey?{...i,cantidad:i.cantidad+1,subtotal:(i.cantidad+1)*i.precio}:i));}
     else{setPosItems(its=>[...its,{itemKey,productoId:prod.id,varianteId:varianteId??null,varianteNombre:variante?.nombre||null,productoNombre:nomCompleto,cantidad:1,precio:precioFinal,precioOrig:precioFinal,costo:prod.costo,subtotal:precioFinal,esEspecial:!!pesp}]);}
-  };
+  }
   const posChangeQty=(itemKey,delta)=>{
     const it=posItems.find(i=>i.itemKey===itemKey);if(!it)return;
-    const prod=products.find(p=>p.id===it.productoId);
+    const prod=safeList(products).find(p=>p.id===it.productoId);
     const stockDisp=it.varianteId!==null?(prod?.variantes||[]).find(v=>v.id===it.varianteId)?.stock??999:prod?.stock??999;
     setPosItems(its=>its.map(i=>{
       if(i.itemKey!==itemKey)return i;
@@ -1251,22 +1686,21 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   };
   const posClear=()=>{setPosItems([]);setPosCliente('');setPosTipo('contado');setPosFecha(today());setPosDesc('');setPosDescTipo('pct');setPosPagos([{metodo:'efectivo',monto:''}]);setPosUsePuntos(false);setPosBarcode('');setPosBusca('');setPosEditingPrice(null);setPosNota('');};
 
-  const posCobrar=()=>{
+  const posCobrar=async()=>{
     if(posItems.length===0)return showToast('Carrito vacío',C.red);
-    const cli=clientes.find(c=>c.id===+posCliente);
+    const cli=safeList(clientes).find(c=>c.id===+posCliente);
     if(!cli)return showToast('Selecciona un cliente',C.red);
-    /* límite de crédito */
     if(posTipo==='credito'&&(cli.limiteCredito||0)>0){
-      const saldoPend=ventas.filter(v=>v.clienteId===cli.id&&v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
+      const saldoPend=safeList(ventas).filter(v=>v.clienteId===cli.id&&v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
       if(saldoPend+posTotal>(cli.limiteCredito||0))return showToast(`⛔ Límite de crédito excedido. Saldo actual: ${fmt(saldoPend)} / Límite: ${fmt(cli.limiteCredito)}`,C.red);
     }
     if(posTipo==='contado'&&posTotalPagado<posTotal-0.01)return showToast(`Falta ${fmt(posTotal-posTotalPagado)} por cubrir`,C.red);
+
     const totalCosto=posItems.reduce((a,i)=>a+i.costo*i.cantidad,0);
     const folio=nextFolio();
     const abonado=posTipo==='contado'?posTotal:0;
     const pagosF=posTipo==='contado'?posPagos.filter(p=>+p.monto>0).map(p=>({metodo:p.metodo,monto:+p.monto})):[];
     const formaPagoLegacy=pagosF.length===1?pagosF[0].metodo:pagosF.length>1?'mixto':'efectivo';
-    /* puntos ganados = floor(total/10); gastados = posPuntosDesc */
     const puntosGanados=posTipo==='contado'&&config.puntosActivo!==false?Math.floor(posTotal/(config.puntosPorCadaL||10)):0;
     const v={id:uid(),folio,fecha:posFecha,tipo:posTipo,estado:posTipo==='contado'?'pagada':'pendiente',
       clienteId:cli.id,clienteNombre:cli.nombre,cajero:session?.nombre||'',
@@ -1276,8 +1710,8 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
       total:posTotal,totalCosto,abonado,saldo:posTotal-abonado,
       pagos:pagosF,formaPago:formaPagoLegacy,
       montoRecibido:posTotalPagado,cambio:posCambio,nota:posNota.trim()};
-    /* descontar stock: variantes o producto normal */
-    setProducts(ps=>ps.map(p=>{
+
+    const nuevosProductos=safeList(products).map(p=>{
       const its=v.items.filter(i=>i.productoId===p.id);
       if(!its.length)return p;
       if((p.variantes||[]).length>0){
@@ -1288,14 +1722,45 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
         return{...p,variantes:newVars,stock:newVars.reduce((a,vr)=>a+vr.stock,0)};
       }
       return{...p,stock:p.stock-its.reduce((a,i)=>a+i.cantidad,0)};
-    }));
-    /* actualizar puntos cliente */
-    setClientes(cs=>cs.map(c=>{
+    });
+
+    const nuevosClientes=safeList(clientes).map(c=>{
       if(c.id!==cli.id)return c;
       const np=Math.max(0,(c.puntos||0)-posPuntosDesc)+puntosGanados;
       return{...c,compras:c.compras+1,puntos:np};
-    }));
-    setVentas(vs=>[v,...vs]);
+    });
+
+    const nuevasVentas=[v,...ventas];
+
+    setProducts(nuevosProductos);
+    setClientes(nuevosClientes);
+    setVentas(nuevasVentas);
+    try{ localStorage.setItem(KEYS.ventas, JSON.stringify(nuevasVentas)); }catch{}
+    try{ localStorage.setItem(KEYS.clientes, JSON.stringify(nuevosClientes)); }catch{}
+    try{ await idbSet(KEYS.products, nuevosProductos); }catch{}
+
+    const syncStamp=Date.now();
+    setSyncStamp(KEYS.products,syncStamp);
+    setSyncStamp(KEYS.clientes,syncStamp);
+    setSyncStamp(KEYS.ventas,syncStamp);
+    try{
+      persistStore(KEYS.ventas,nuevasVentas);
+      persistStore(KEYS.clientes,nuevosClientes);
+      persistStore(KEYS.products,nuevosProductos);
+    }catch{}
+    try{
+      if(_sbReady && supabase){
+        const touchedProductIds=[...new Set(v.items.map(it=>String(it.productoId)).filter(Boolean))];
+        await Promise.all([
+          upsertCollectionItem(KEYS.ventas,v,syncStamp),
+          upsertCollectionItem(KEYS.clientes,nuevosClientes.find(c=>c.id===cli.id),syncStamp),
+          upsertProductsByIds(touchedProductIds,nuevosProductos,syncStamp)
+        ]);
+      }
+    }catch(e){
+      console.error('Error sincronizando venta en tiempo real:',e?.message||e);
+    }
+
     showToast(`✅ Venta ${folio} — ${fmt(posTotal)}${puntosGanados>0?` · +${puntosGanados} puntos`:''}`);
     logActividad('venta',`Venta ${folio}: ${fmt(posTotal)}`,{folio,total:posTotal,cajero:session?.nombre},session?.nombre||'');
     setEdit(v);setModal('ventaOk');
@@ -1315,7 +1780,7 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
       if(precioViejo!==precioNuevo||costoViejo!==costoNuevo){
         setPrecioHist(h=>[{id:uid(),productoId:editing.id,productoNombre:pForm.nombre||editing.nombre,fecha:today(),precioAntes:precioViejo,precioNuevo,costoAntes:costoViejo,costoNuevo,cajero:session?.nombre||''},...h]);
       }
-      setProducts(ps=>ps.map(p=>p.id===editing.id?{...p,...pForm,stock:stockFinal,precio:+pForm.precio,costo:+pForm.costo,stockMinimo:+pForm.stockMinimo,proveedorId:+pForm.proveedorId||null,variantes:pVariantes}:p));
+      setProducts(ps=>safeList(ps).map(p=>p.id===editing.id?{...p,...pForm,stock:stockFinal,precio:+pForm.precio,costo:+pForm.costo,stockMinimo:+pForm.stockMinimo,proveedorId:+pForm.proveedorId||null,variantes:pVariantes}:p));
       if(pVariantes.length===0&&+pForm.stock!==editing.stock&&+pForm.stock>=0){
         const delta=+pForm.stock-editing.stock;
         setMovs(ms=>[{id:uid(),fecha:today(),tipo:delta>0?'ingreso':'salida',productoId:editing.id,productoNombre:pForm.nombre||editing.nombre,cantidad:Math.abs(delta),nota:'Ajuste de inventario (edición)',stockAntes:editing.stock,stockDespues:+pForm.stock,cajero:session?.nombre||''},...ms]);
@@ -1337,8 +1802,26 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   /* ── CLIENTES ── */
   const openAddC=()=>{setCForm({nombre:'',email:'',telefono:'',direccion:'',fechaNacimiento:'',limiteCredito:''});setModal('addC');};
   const openEditC=c=>{setCForm({nombre:c.nombre,email:c.email||'',telefono:c.telefono||'',direccion:c.direccion||'',fechaNacimiento:c.fechaNacimiento||'',limiteCredito:c.limiteCredito||''});setEdit(c);setModal('editC');};
-  const saveC=()=>{if(!cForm.nombre)return showToast('Nombre obligatorio',C.red);if(editing){setClientes(cs=>cs.map(c=>c.id===editing.id?{...c,...cForm,limiteCredito:+cForm.limiteCredito||0}:c));showToast('Actualizado ✓');}else{setClientes(cs=>[...cs,{id:uid(),...cForm,limiteCredito:+cForm.limiteCredito||0,compras:0,puntos:0,preciosEspeciales:[]}]);showToast('Cliente agregado ✓');}closeModal();};
-  const delC=id=>askConf('¿Eliminar este cliente?',()=>{setClientes(cs=>cs.filter(c=>c.id!==id));showToast('Eliminado',C.red);});
+  const saveC=async()=>{if(!cForm.nombre)return showToast('Nombre obligatorio',C.red);
+    const nextCliente=editing?{...editing,...cForm,limiteCredito:+cForm.limiteCredito||0}:{id:uid(),...cForm,limiteCredito:+cForm.limiteCredito||0,compras:0,puntos:0,preciosEspeciales:[]};
+    const nuevosClientes=editing?safeList(clientes).map(c=>c.id===editing.id?nextCliente:c):[...safeList(clientes),nextCliente];
+    setClientes(nuevosClientes);
+    try{
+      localStorage.setItem(KEYS.clientes, JSON.stringify(nuevosClientes));
+      setSyncStamp(KEYS.clientes, Date.now());
+      if(_sbReady && supabase) await syncCollectionTable(KEYS.clientes, nuevosClientes, Date.now(), {prune:true});
+    }catch(e){ console.error('Error sincronizando cliente:', e?.message||e); }
+    showToast(editing?'Actualizado ✓':'Cliente agregado ✓');closeModal();};
+  const delC=id=>askConf('¿Eliminar este cliente?',async()=>{
+    const nuevosClientes=safeList(clientes).filter(c=>c.id!==id);
+    setClientes(nuevosClientes);
+    try{
+      localStorage.setItem(KEYS.clientes, JSON.stringify(nuevosClientes));
+      setSyncStamp(KEYS.clientes, Date.now());
+      if(_sbReady && supabase) await syncCollectionTable(KEYS.clientes, nuevosClientes, Date.now(), {prune:true});
+    }catch(e){ console.error('Error eliminando cliente:', e?.message||e); }
+    showToast('Eliminado',C.red);
+  });
   const openPreciosEsp=c=>{setEdit(c);setModal('preciosEsp');};
   const savePrecioEsp=(clienteId,productoId,precio)=>{
     setClientes(cs=>cs.map(c=>{
@@ -1350,9 +1833,19 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
 
   /* ── PROVEEDORES ── */
   const openAddProv=()=>{setProvForm({nombre:'',contacto:'',telefono:'',email:'',notas:''});setModal('addProv');};
-  const openEditProv=p=>{setProvForm({nombre:p.nombre,contacto:p.contacto||'',telefono:p.telefono||'',email:p.email||'',notas:p.notas||''});setEdit(p);setModal('editProv');};
-  const saveProv=()=>{if(!provForm.nombre.trim())return showToast('Nombre obligatorio',C.red);if(editing){setProv(ps=>ps.map(p=>p.id===editing.id?{...p,...provForm}:p));showToast('Proveedor actualizado ✓');}else{setProv(ps=>[...ps,{id:uid(),...provForm}]);showToast('Proveedor agregado ✓');}closeModal();};
-  const delProv=id=>askConf('¿Eliminar proveedor?',()=>{setProv(ps=>ps.filter(p=>p.id!==id));showToast('Eliminado',C.red);});
+  const openEditProv=p=>{setProvForm({nombre:p?.nombre||'',contacto:p?.contacto||'',telefono:p?.telefono||'',email:p?.email||'',notas:p?.notas||''});setEdit(p);setModal('editProv');};
+  const saveProv=()=>{
+    if(!provForm.nombre.trim())return showToast('Nombre obligatorio',C.red);
+    if(editing){
+      safeSetList(setProv,ps=>ps.map(p=>p.id===editing.id?{...p,...provForm}:p),IPROV);
+      showToast('Proveedor actualizado ✓');
+    }else{
+      safeSetList(setProv,ps=>[...ps,{id:uid(),...provForm}],IPROV);
+      showToast('Proveedor agregado ✓');
+    }
+    closeModal();
+  };
+  const delProv=id=>askConf('¿Eliminar proveedor?',()=>{safeSetList(setProv,ps=>ps.filter(p=>p.id!==id),IPROV);showToast('Eliminado',C.red);});
 
   /* ── USUARIOS ── */
   const saveUser=()=>{
@@ -1366,18 +1859,46 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
 
   /* ── MOVIMIENTOS ── */
   const openAddMov=()=>{setMovForm({tipo:'ingreso',productoId:'',cantidad:'',nota:'',fecha:today()});setModal('addMov');};
-  const saveMov=()=>{
-    const prod=products.find(p=>p.id===+movForm.productoId);
+  const saveMov=async()=>{
+    const prod=safeList(products).find(p=>p.id===+movForm.productoId);
     if(!prod||!movForm.cantidad||+movForm.cantidad<=0)return showToast('Completa todos los campos',C.red);
     if(movForm.tipo==='salida'&&+movForm.cantidad>prod.stock)return showToast(`Stock insuficiente (${prod.stock})`,C.red);
-    const delta=movForm.tipo==='ingreso'?+movForm.cantidad:-movForm.cantidad;
-    setProducts(ps=>ps.map(p=>p.id===prod.id?{...p,stock:p.stock+delta}:p));
-    setMovs(ms=>[{id:uid(),fecha:movForm.fecha,tipo:movForm.tipo,productoId:prod.id,productoNombre:prod.nombre,cantidad:+movForm.cantidad,nota:movForm.nota,stockAntes:prod.stock,stockDespues:prod.stock+delta,cajero:session?.nombre||''},...ms]);
+
+    const delta=movForm.tipo==='ingreso'?+movForm.cantidad:-+movForm.cantidad;
+    const nuevosProductos=safeList(products).map(p=>{
+      if(p.id!==prod.id) return p;
+      return {...p,stock:Number(p.stock||0)+delta};
+    });
+    const nuevoMov={id:uid(),fecha:movForm.fecha,tipo:movForm.tipo,productoId:prod.id,productoNombre:prod.nombre,cantidad:+movForm.cantidad,nota:movForm.nota,stockAntes:Number(prod.stock||0),stockDespues:Number(prod.stock||0)+delta,cajero:session?.nombre||''};
+    const nuevosMovs=[nuevoMov,...safeList(movs)];
+
+    setProducts(prev=>mergeProducts(prev,nuevosProductos));
+    setMovs(nuevosMovs);
+
+    try{ await idbSet(KEYS.products, mergeProducts(safeList(products), nuevosProductos)); }catch{}
+    try{ localStorage.setItem(KEYS.products, JSON.stringify(mergeProducts(safeList(products), nuevosProductos))); }catch{}
+    try{ localStorage.setItem(KEYS.movs, JSON.stringify(nuevosMovs)); }catch{}
+
+    const syncStamp=Date.now();
+    setSyncStamp(KEYS.products,syncStamp);
+    try{
+      persistStore(KEYS.products, mergeProducts(safeList(products), nuevosProductos));
+      persistStore(KEYS.movs, nuevosMovs);
+    }catch{}
+    try{
+      if(_sbReady && supabase && typeof upsertProductsByIds==='function'){
+        await upsertProductsByIds([String(prod.id)], mergeProducts(safeList(products), nuevosProductos), syncStamp);
+      }
+    }catch(e){
+      console.error('Error sincronizando movimiento de stock:', e?.message||e);
+    }
+
+    setTimeout(()=>setProducts(ps=>[...safeList(ps)]),50);
     showToast(movForm.tipo==='ingreso'?'Ingreso ✓':'Salida ✓');closeModal();
   };
 
   /* ── GASTOS ── */
-  const saveGasto=()=>{if(!gastoF.descripcion||!gastoF.monto||+gastoF.monto<=0)return showToast('Campos requeridos',C.red);const cat=catGastos.find(c=>c.id===+gastoF.categoriaId);const prov=proveedores.find(p=>p.id===+gastoF.proveedorId);const g={id:uid(),...gastoF,monto:+gastoF.monto,categoriaNombre:cat?.nombre||'Sin categoría',proveedorNombre:prov?.nombre||''};setGastos(gs=>[g,...gs]);logActividad('gasto',`Gasto: ${g.descripcion} ${fmt(g.monto)}`,{monto:g.monto,cat:g.categoriaNombre},session?.nombre||'');showToast('Gasto registrado ✓');closeModal();};
+  const saveGasto=()=>{if(!gastoF.descripcion||!gastoF.monto||+gastoF.monto<=0)return showToast('Campos requeridos',C.red);const cat=catGastos.find(c=>c.id===+gastoF.categoriaId);const prov=proveedoresSafe.find(p=>p.id===+gastoF.proveedorId);const g={id:uid(),...gastoF,monto:+gastoF.monto,categoriaNombre:cat?.nombre||'Sin categoría',proveedorNombre:prov?.nombre||''};setGastos(gs=>[g,...gs]);logActividad('gasto',`Gasto: ${g.descripcion} ${fmt(g.monto)}`,{monto:g.monto,cat:g.categoriaNombre},session?.nombre||'');showToast('Gasto registrado ✓');closeModal();};
   const delGasto=id=>askConf('¿Eliminar gasto?',()=>{setGastos(gs=>gs.filter(g=>g.id!==id));showToast('Eliminado',C.red);});
 
   /* ── INGRESO RÁPIDO DE STOCK ── */
@@ -1385,21 +1906,45 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
     setMovForm({tipo:'ingreso',productoId:String(prod.id),cantidad:'',nota:'Ingreso de stock',fecha:today()});
     setEdit(prod);setModal('ingresoRapido');
   };
-  const saveIngresoRapido=()=>{
-    const prod=products.find(p=>p.id===+movForm.productoId);
+  const saveIngresoRapido=async()=>{
+    const prod=safeList(products).find(p=>p.id===+movForm.productoId);
     if(!prod||!movForm.cantidad||+movForm.cantidad<=0)return showToast('Ingresa una cantidad válida',C.red);
     const delta=+movForm.cantidad;
-    const stNew=prod.stock+delta;
+    const stNew=Number(prod.stock||0)+delta;
     /* Si el producto tiene variantes, el ingreso rápido solo actualiza el stock general */
-    setProducts(ps=>ps.map(p=>p.id===prod.id?{...p,stock:stNew}:p));
-    setMovs(ms=>[{id:uid(),fecha:movForm.fecha,tipo:'ingreso',productoId:prod.id,productoNombre:prod.nombre,cantidad:delta,nota:movForm.nota||'Ingreso de stock',stockAntes:prod.stock,stockDespues:stNew,cajero:session?.nombre||''},...ms]);
+    const nuevosProductos=safeList(products).map(p=>p.id===prod.id?{...p,stock:stNew}:p);
+    const nuevoMov={id:uid(),fecha:movForm.fecha,tipo:'ingreso',productoId:prod.id,productoNombre:prod.nombre,cantidad:delta,nota:movForm.nota||'Ingreso de stock',stockAntes:Number(prod.stock||0),stockDespues:stNew,cajero:session?.nombre||''};
+    const nuevosMovs=[nuevoMov,...safeList(movs)];
+
+    setProducts(prev=>mergeProducts(prev,nuevosProductos));
+    setMovs(nuevosMovs);
+
+    try{ await idbSet(KEYS.products, mergeProducts(safeList(products), nuevosProductos)); }catch{}
+    try{ localStorage.setItem(KEYS.products, JSON.stringify(mergeProducts(safeList(products), nuevosProductos))); }catch{}
+    try{ localStorage.setItem(KEYS.movs, JSON.stringify(nuevosMovs)); }catch{}
+
+    const syncStamp=Date.now();
+    setSyncStamp(KEYS.products,syncStamp);
+    try{
+      persistStore(KEYS.products, mergeProducts(safeList(products), nuevosProductos));
+      persistStore(KEYS.movs, nuevosMovs);
+    }catch{}
+    try{
+      if(_sbReady && supabase && typeof upsertProductsByIds==='function'){
+        await upsertProductsByIds([String(prod.id)], mergeProducts(safeList(products), nuevosProductos), syncStamp);
+      }
+    }catch(e){
+      console.error('Error sincronizando ingreso rápido:', e?.message||e);
+    }
+
+    setTimeout(()=>setProducts(ps=>[...safeList(ps)]),50);
     showToast(`✅ +${delta} unidades en ${prod.nombre}`);closeModal();setEdit(null);
   };
 
   /* ── ESTADO DE CUENTA IMPRIMIBLE ── */
   const printEstadoCuenta=cli=>{
-    const hVentas=ventas.filter(v=>v.clienteId===cli.id).sort((a,b)=>a.fecha>b.fecha?-1:1);
-    const hAbonos=abonos.filter(a=>a.clienteId===cli.id);
+    const hVentas=safeList(ventas).filter(v=>v.clienteId===cli.id).sort((a,b)=>a.fecha>b.fecha?-1:1);
+    const hAbonos=safeList(abonos).filter(a=>a.clienteId===cli.id);
     const totalFacturado=hVentas.reduce((a,v)=>a+v.total,0);
     const totalPagado=hVentas.reduce((a,v)=>a+v.abonado,0);
     const saldoPendiente=hVentas.reduce((a,v)=>a+v.saldo,0);
@@ -1502,13 +2047,13 @@ ${hVentas.length>0?`<h2>Facturas (${hVentas.length})</h2>${facturas}`:'<p style=
   };
   const waCotizacion=cot=>{
     const items=cot.items.map(i=>`  • ${i.productoNombre} ×${i.cantidad} — L ${(i.precio*i.cantidad).toLocaleString('es-HN',{minimumFractionDigits:2})}`).join('\n');
-    const cli=clientes.find(c=>c.id===cot.clienteId);
+    const cli=safeList(clientes).find(c=>c.id===cot.clienteId);
     const msg=`🌸 *${config.nombre}* — Cotización ${cot.folio}\n\nHola ${cot.clienteNombre}! Te enviamos tu cotización:\n\n${items}\n\n*Total: L ${cot.total.toLocaleString('es-HN',{minimumFractionDigits:2})}*\n\n¡Gracias por tu interés! 💕`;
     waLink(cli?.telefono||config.whatsappNumero||'', msg);
   };
   const waEstadoCuenta=cli=>{
-    const saldo=ventas.filter(v=>v.clienteId===cli.id&&v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
-    const msg=`🌸 *${config.nombre}* — Estado de Cuenta\n\nHola *${cli.nombre}*!\n\n📊 Resumen de tu cuenta:\n• Total facturado: L ${ventas.filter(v=>v.clienteId===cli.id).reduce((a,v)=>a+v.total,0).toLocaleString('es-HN',{minimumFractionDigits:2})}\n• Saldo pendiente: L ${saldo.toLocaleString('es-HN',{minimumFractionDigits:2})}${(cli.puntos||0)>0?`\n⭐ Puntos disponibles: ${cli.puntos}`:''}\n\n¡Gracias por tu preferencia! 💕`;
+    const saldo=safeList(ventas).filter(v=>v.clienteId===cli.id&&v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
+    const msg=`🌸 *${config.nombre}* — Estado de Cuenta\n\nHola *${cli.nombre}*!\n\n📊 Resumen de tu cuenta:\n• Total facturado: L ${safeList(ventas).filter(v=>v.clienteId===cli.id).reduce((a,v)=>a+v.total,0).toLocaleString('es-HN',{minimumFractionDigits:2})}\n• Saldo pendiente: L ${saldo.toLocaleString('es-HN',{minimumFractionDigits:2})}${(cli.puntos||0)>0?`\n⭐ Puntos disponibles: ${cli.puntos}`:''}\n\n¡Gracias por tu preferencia! 💕`;
     waLink(cli.telefono||'', msg);
   };
 
@@ -1529,15 +2074,15 @@ ${hVentas.length>0?`<h2>Facturas (${hVentas.length})</h2>${facturas}`:'<p style=
   };
   const exportInventarioCSV=()=>{
     exportCSV(
-      products.map(p=>[p.nombre,p.categoria,stockTotal(p),p.precio,p.costo,p.precio*stockTotal(p),p.codigoBarras||'']),
+      safeList(products).map(p=>[p.nombre,p.categoria,stockTotal(p),p.precio,p.costo,p.precio*stockTotal(p),p.codigoBarras||'']),
       ['Producto','Categoría','Stock','Precio','Costo','Valor Inventario','Código Barras'],
       `inventario_${today()}.csv`
     );
   };
   const exportClientesCSV=()=>{
     exportCSV(
-      clientes.map(c=>{
-        const hist=ventas.filter(v=>v.clienteId===c.id);
+      safeList(clientes).map(c=>{
+        const hist=safeList(ventas).filter(v=>v.clienteId===c.id);
         const saldo=hist.filter(v=>v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
         return[c.nombre,c.email||'',c.telefono||'',c.direccion||'',c.compras,hist.reduce((a,v)=>a+v.total,0),saldo,c.puntos||0,c.limiteCredito||0];
       }),
@@ -1559,16 +2104,16 @@ ${rows.map(r=>`<Row>${r.map(v=>`<Cell><Data ss:Type="${typeof v==='number'?'Numb
 </Worksheet>`;
     const ventasSheet=sheet('Ventas',
       ['Folio','Fecha','Cliente','Cajero','Tipo','Estado','Pago','Total','Costo','Ganancia','Descuento','Saldo','Nota'],
-      ventas.map(v=>[v.folio,v.fecha,v.clienteNombre,v.cajero||'',v.tipo,v.estado,v.formaPago,v.total,v.totalCosto||0,v.total-(v.totalCosto||0),v.descuento||0,v.saldo||0,v.nota||''])
+      safeList(ventas).map(v=>[v.folio,v.fecha,v.clienteNombre,v.cajero||'',v.tipo,v.estado,v.formaPago,v.total,v.totalCosto||0,v.total-(v.totalCosto||0),v.descuento||0,v.saldo||0,v.nota||''])
     );
     const inventarioSheet=sheet('Inventario',
       ['ID','Nombre','Categoría','Stock','Precio','Costo','Margen%','Valor Inventario','Stock Mínimo','Código Barras'],
-      products.map(p=>[p.id,p.nombre,p.categoria,stockTotal(p),p.precio,p.costo,p.precio>0?+(((p.precio-p.costo)/p.precio*100).toFixed(1)):0,p.precio*stockTotal(p),p.stockMinimo||0,p.codigoBarras||''])
+      safeList(products).map(p=>[p.id,p.nombre,p.categoria,stockTotal(p),p.precio,p.costo,p.precio>0?+(((p.precio-p.costo)/p.precio*100).toFixed(1)):0,p.precio*stockTotal(p),p.stockMinimo||0,p.codigoBarras||''])
     );
     const clientesSheet=sheet('Clientes',
       ['Nombre','Email','Teléfono','Dirección','Compras','Total Facturado','Saldo Pendiente','Puntos','Nivel'],
-      clientes.map(c=>{
-        const hist=ventas.filter(v=>v.clienteId===c.id);
+      safeList(clientes).map(c=>{
+        const hist=safeList(ventas).filter(v=>v.clienteId===c.id);
         const tG=hist.reduce((a,v)=>a+v.total,0);
         const sP=hist.filter(v=>v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
         const lvl=getLoyalty(tG);
@@ -1581,7 +2126,7 @@ ${rows.map(r=>`<Row>${r.map(v=>`<Cell><Data ss:Type="${typeof v==='number'?'Numb
     );
     const abonosSheet=sheet('Abonos',
       ['ID','Fecha','Folio Venta','Cliente','Monto','Nota'],
-      abonos.map(a=>[a.id,a.fecha,a.folio,a.clienteNombre,a.monto,a.nota||''])
+      safeList(abonos).map(a=>[a.id,a.fecha,a.folio,a.clienteNombre,a.monto,a.nota||''])
     );
     const xml=`<?xml version="1.0" encoding="UTF-8"?>
 <?mso-application progid="Excel.Sheet"?>
@@ -1598,37 +2143,118 @@ ${ventasSheet}${inventarioSheet}${clientesSheet}${gastosSheet}${abonosSheet}
     showToast('📊 Excel exportado con 5 hojas ✓');
   };
 
-  /* ── ACTIVIDAD / BACKUP ── */
-const backupSupabase = async () => {
-  // 🔒 Validar conexión
-  if (!supabase) {
-    alert("❌ Supabase no está conectado. Revisa el archivo .env");
-    console.error("Supabase es null");
-    return;
-  }
 
-  try {
-    const data = {
-      fecha: new Date().toISOString(),
-      tipo: "manual"
+  const syncRestoredBackup=async(d)=>{
+    const snapshot={
+      products:normalizeArray(d.products, products),
+      clientes:normalizeArray(d.clientes, clientes),
+      ventas:normalizeArray(d.ventas, ventas),
+      movimientos:normalizeArray(d.movimientos, movs),
+      abonos:normalizeArray(d.abonos, abonos),
+      gastos:normalizeArray(d.gastos, gastos),
+      catGastos:normalizeArray(d.catGastos, catGastos),
+      proveedores:normalizeArray(d.proveedores, proveedoresSafe),
+      arqueos:normalizeArray(d.arqueos, arqueos),
+      cortesGuardados:normalizeArray(d.cortesGuardados, cortesGuardados),
+      cotizaciones:normalizeArray(d.cotizaciones, cotizaciones),
+      devoluciones:normalizeArray(d.devoluciones, devoluciones),
+      precioHistorial:normalizeArray(d.precioHistorial, precioHistorial),
+      apartados:normalizeArray(d.apartados, apartados),
+      recordatorios:normalizeArray(d.recordatorios, recordatorios),
+      conteos:normalizeArray(d.conteos, conteos),
+      users:normalizeArray(d.users, users),
+      ordenesCompra:normalizeArray(d.ordenesCompra, ordenesCompra),
+      cuentasPagar:normalizeArray(d.cuentasPagar, cuentasPagar),
+      aperturasC:normalizeArray(d.aperturasC, aperturasC),
+      folioNum:normalizeNumber(d.folioNum, folioNum),
+      cotFolioNum:normalizeNumber(d.cotFolioNum, cotFolioNum),
     };
-
-    const { error } = await supabase
-      .from("backups")
-      .insert([data]);
-
-    if (error) {
-      console.error("Error creando backup:", error);
-      alert("Error al crear backup: " + error.message);
-      return;
+    const stamp=Date.now();
+    try{ await idbSet(KEYS.products, snapshot.products); }catch{}
+    try{ localStorage.setItem(KEYS.clientes, JSON.stringify(snapshot.clientes)); }catch{}
+    try{ localStorage.setItem(KEYS.ventas, JSON.stringify(snapshot.ventas)); }catch{}
+    try{ localStorage.setItem(KEYS.abonos, JSON.stringify(snapshot.abonos)); }catch{}
+    const persistPairs=[
+      [KEYS.products, snapshot.products],
+      [KEYS.clientes, snapshot.clientes],
+      [KEYS.ventas, snapshot.ventas],
+      [KEYS.movimientos, snapshot.movimientos],
+      [KEYS.abonos, snapshot.abonos],
+      [KEYS.gastos, snapshot.gastos],
+      [KEYS.catGastos, snapshot.catGastos],
+      [KEYS.folio, snapshot.folioNum],
+      [KEYS.users, snapshot.users],
+      [KEYS.proveedores, snapshot.proveedores],
+      [KEYS.arqueos, snapshot.arqueos],
+      [KEYS.cortesGuardados, snapshot.cortesGuardados],
+      [KEYS.cotizaciones, snapshot.cotizaciones],
+      [KEYS.cotFolio, snapshot.cotFolioNum],
+      [KEYS.devoluciones, snapshot.devoluciones],
+      [KEYS.precioHistorial, snapshot.precioHistorial],
+      [KEYS.apartados, snapshot.apartados],
+      [KEYS.recordatorios, snapshot.recordatorios],
+      [KEYS.conteoFisico, snapshot.conteos],
+      [KEYS.aperturasC, snapshot.aperturasC],
+      [KEYS.ordenesCompra, snapshot.ordenesCompra],
+      [KEYS.cuentasPagar, snapshot.cuentasPagar],
+    ];
+    for(const [k,v] of persistPairs){
+      try{ persistStore(k,v); }catch(e){ console.error('Restore persist error:',k,e?.message||e); }
+      try{ setSyncStamp(k,stamp); }catch{}
     }
+    try{
+      if(_sbReady && supabase){
+        await Promise.all([
+          replaceProductsRemote(snapshot.products, stamp),
+          syncCollectionTable(KEYS.clientes, snapshot.clientes, stamp, { prune:true }),
+          syncCollectionTable(KEYS.ventas, snapshot.ventas, stamp, { prune:true }),
+          syncCollectionTable(KEYS.abonos, snapshot.abonos, stamp, { prune:true }),
+          flushSyncQueue(),
+        ]);
+      }
+    }catch(e){
+      console.error('Restore realtime sync error:', e?.message||e);
+    }
+    return snapshot;
+  };
 
-    alert("✅ Backup creado correctamente");
-  } catch (err) {
-    console.error("Backup error:", err);
-    alert("Error ejecutando backup");
-  }
-};
+  /* ── ACTIVIDAD / BACKUP ── */
+  const backupSupabase=async()=>{
+    if(!sbOnline){showToast('⚠️ Sin conexión con Supabase',C.amber);return;}
+    try{
+      const data={
+        _version:11,_fecha:new Date().toISOString(),_app:'AdornArte',
+        products,clientes,ventas,movimientos:movs,abonos,gastos,catGastos,
+        proveedores,arqueos,cortesGuardados,cotizaciones,devoluciones,
+        precioHistorial,config,apartados,recordatorios,conteos,
+        folioNum,cotFolioNum,users,ordenesCompra,cuentasPagar,
+      };
+      const payload={
+        fecha:new Date().toISOString(),
+        cajero:session?.nombre||'Sistema',
+        version:data._version,
+        datos:data,
+      };
+      const {error}=await supabase.from('adornarte_backups').insert([payload]);
+      if(error)throw error;
+      logActividad('backup',`Backup guardado por ${session?.nombre||'Sistema'}`,{},session?.nombre||'');
+      showToast('☁️ Backup guardado en Supabase ✓');
+    }catch(e){
+      console.error('Error creando backup:',e);
+      showToast('❌ Error: '+(e.message||''),C.red);
+    }
+  };
+
+  const loadActividad=async()=>{
+    try{
+      const {data,error}=await supabase
+        .from('adornarte_activity')
+        .select('*')
+        .order('fecha',{ascending:false})
+        .limit(200);
+      if(!error&&data) setActividadLog(data);
+    }catch{}
+  };
   useEffect(() => {
     if (tab === 'Actividad') {
       void loadActividad();
@@ -1652,7 +2278,7 @@ const backupSupabase = async () => {
   };
 
   const restoreFromSbBackup=async(backupId)=>{
-    if(!window.confirm('⚠️ ¿Restaurar este backup? Los datos actuales serán reemplazados.'))return;
+    if(!window.confirm('⚠️ ¿Restaurar este backup? Los datos actuales serán reemplazados y se sincronizarán en todos los dispositivos.'))return;
     try{
       const {data,error}=await supabase
         .from('adornarte_backups')
@@ -1660,31 +2286,66 @@ const backupSupabase = async () => {
         .eq('id',backupId)
         .single();
       if(error)throw error;
-      const d=data.datos;
+      const d=data?.datos;
       if(!d||(!d.products&&!d.ventas))throw new Error('Backup inválido o vacío');
-      if(d.products)       setProducts(d.products);
-      if(d.clientes)       setClientes(d.clientes);
-      if(d.ventas)         setVentas(d.ventas);
-      if(d.movimientos)    setMovs(d.movimientos);
-      if(d.abonos)         setAbonos(d.abonos);
-      if(d.gastos)         setGastos(d.gastos);
-      if(d.catGastos)      setCatG(d.catGastos);
-      if(d.proveedores)    setProv(d.proveedores);
-      if(d.arqueos)        setArqueos(d.arqueos);
-      if(d.cortesGuardados)setCortesGuardados(d.cortesGuardados);
-      if(d.cotizaciones)   setCotiz(d.cotizaciones);
-      if(d.devoluciones)   setDevs(d.devoluciones);
-      if(d.config)         setConfig(prev=>({...DEFAULT_CONFIG,...d.config,respaldoAuto:d.config?.respaldoAuto||prev.respaldoAuto||DEFAULT_CONFIG.respaldoAuto}));
-      if(d.apartados)      setApartados(d.apartados);
-      if(d.recordatorios)  setRecord(d.recordatorios);
-      if(d.conteos)        setConteos(d.conteos);
-      if(d.folioNum)       setFolioNum(d.folioNum);
-      if(d.cotFolioNum)    setCotFolioN(d.cotFolioNum);
-      if(d.users)          setUsers(d.users);
-      if(d.ordenesCompra)  setOrdenes(d.ordenesCompra);
+
+      const restoredProducts=normalizeArray(d.products, products);
+      const restoredClientes=normalizeArray(d.clientes, clientes);
+      const restoredVentas=normalizeArray(d.ventas, ventas);
+      const restoredMovs=normalizeArray(d.movimientos, movs);
+      const restoredAbonos=normalizeArray(d.abonos, abonos);
+      const restoredGastos=normalizeArray(d.gastos, gastos);
+      const restoredCatG=normalizeArray(d.catGastos, catGastos);
+      const restoredProv=normalizeArray(d.proveedores, proveedoresSafe);
+      const restoredArqueos=normalizeArray(d.arqueos, arqueos);
+      const restoredCortes=normalizeArray(d.cortesGuardados, cortesGuardados);
+      const restoredCotiz=normalizeArray(d.cotizaciones, cotizaciones);
+      const restoredDevs=normalizeArray(d.devoluciones, devoluciones);
+      const restoredPrecioHist=normalizeArray(d.precioHistorial, precioHistorial);
+      const restoredApartados=normalizeArray(d.apartados, apartados);
+      const restoredRecord=normalizeArray(d.recordatorios, recordatorios);
+      const restoredConteos=normalizeArray(d.conteos, conteos);
+      const restoredUsers=normalizeArray(d.users, users);
+      const restoredOrdenes=normalizeArray(d.ordenesCompra, ordenesCompra);
+      const restoredCuentas=normalizeArray(d.cuentasPagar, cuentasPagar);
+      const restoredAperturas=normalizeArray(d.aperturasC, aperturasC);
+
+      setProducts(restoredProducts);
+      setClientes(restoredClientes);
+      setVentas(restoredVentas);
+      setMovs(restoredMovs);
+      setAbonos(restoredAbonos);
+      setGastos(restoredGastos);
+      setCatG(restoredCatG);
+      setProv(normalizeArray(restoredProv, IPROV));
+      setArqueos(restoredArqueos);
+      setCortesGuardados(restoredCortes);
+      setCotiz(restoredCotiz);
+      setDevs(restoredDevs);
+      setPrecioHist(restoredPrecioHist);
+      if(d.config)setConfig(prev=>({...DEFAULT_CONFIG,...prev,...d.config,respaldoAuto:d.config?.respaldoAuto||prev.respaldoAuto||DEFAULT_CONFIG.respaldoAuto}));
+      setApartados(restoredApartados);
+      setRecord(restoredRecord);
+      setConteos(restoredConteos);
+      if(d.folioNum!==undefined)setFolioNum(normalizeNumber(d.folioNum, folioNum));
+      if(d.cotFolioNum!==undefined)setCotFolioN(normalizeNumber(d.cotFolioNum, cotFolioNum));
+      setUsers(restoredUsers);
+      setOrdenes(restoredOrdenes);
+      setCuentasPagar(restoredCuentas);
+      setAperturasC(restoredAperturas);
+
+      await syncRestoredBackup({
+        products:restoredProducts,clientes:restoredClientes,ventas:restoredVentas,movimientos:restoredMovs,
+        abonos:restoredAbonos,gastos:restoredGastos,catGastos:restoredCatG,proveedores:restoredProv,arqueos:restoredArqueos,
+        cortesGuardados:restoredCortes,cotizaciones:restoredCotiz,devoluciones:restoredDevs,precioHistorial:restoredPrecioHist,
+        config:d.config||config,apartados:restoredApartados,recordatorios:restoredRecord,conteos:restoredConteos,
+        folioNum:normalizeNumber(d.folioNum, folioNum),cotFolioNum:normalizeNumber(d.cotFolioNum, cotFolioNum),
+        users:restoredUsers,ordenesCompra:restoredOrdenes,cuentasPagar:restoredCuentas,aperturasC:restoredAperturas,
+      });
+
       logActividad('backup',`Backup restaurado desde Supabase (ID ${backupId}) por ${session?.nombre||'Sistema'}`,{backupId},session?.nombre||'');
       closeModal();
-      showToast('✅ Backup restaurado correctamente desde Supabase ✓');
+      showToast('✅ Backup restaurado y sincronizado en todos los dispositivos ✓');
     }catch(e){showToast('❌ Error al restaurar: '+(e.message||''),C.red);}
   };
 
@@ -1704,32 +2365,68 @@ const backupSupabase = async () => {
   const importBackup=file=>{
     if(!file)return;
     const reader=new FileReader();
-    reader.onload=e=>{
+    reader.onload=async e=>{
       try{
         const d=JSON.parse(e.target.result);
         if(!d._app||!d.products||!d.ventas)return showToast('❌ Archivo inválido',C.red);
-        if(d.products)setProducts(d.products);
-        if(d.clientes)setClientes(d.clientes);
-        if(d.ventas)setVentas(d.ventas);
-        if(d.movimientos)setMovs(d.movimientos);
-        if(d.abonos)setAbonos(d.abonos);
-        if(d.gastos)setGastos(d.gastos);
-        if(d.catGastos)setCatG(d.catGastos);
-        if(d.proveedores)setProv(d.proveedores);
-        if(d.arqueos)setArqueos(d.arqueos);
-        if(d.cortesGuardados)setCortesGuardados(d.cortesGuardados);
-        if(d.cotizaciones)setCotiz(d.cotizaciones);
-        if(d.devoluciones)setDevs(d.devoluciones);
-        if(d.config)setConfig(prev=>({...DEFAULT_CONFIG,...d.config,respaldoAuto:d.config?.respaldoAuto||prev.respaldoAuto||DEFAULT_CONFIG.respaldoAuto}));
-        if(d.apartados)setApartados(d.apartados);
-        if(d.recordatorios)setRecord(d.recordatorios);
-        if(d.conteos)setConteos(d.conteos);
-        if(d.folioNum)setFolioNum(d.folioNum);
-        if(d.cotFolioNum)setCotFolioN(d.cotFolioNum);
-        if(d.users)setUsers(d.users);
-        if(d.ordenesCompra)setOrdenes(d.ordenesCompra);
-        showToast(`✅ Respaldo restaurado: ${d._fecha?.slice(0,10)||''}`);
-      }catch{showToast('❌ Error al leer el archivo',C.red);}
+        const restoredProducts=normalizeArray(d.products, products);
+        const restoredClientes=normalizeArray(d.clientes, clientes);
+        const restoredVentas=normalizeArray(d.ventas, ventas);
+        const restoredMovs=normalizeArray(d.movimientos, movs);
+        const restoredAbonos=normalizeArray(d.abonos, abonos);
+        const restoredGastos=normalizeArray(d.gastos, gastos);
+        const restoredCatG=normalizeArray(d.catGastos, catGastos);
+        const restoredProv=normalizeArray(d.proveedores, proveedoresSafe);
+        const restoredArqueos=normalizeArray(d.arqueos, arqueos);
+        const restoredCortes=normalizeArray(d.cortesGuardados, cortesGuardados);
+        const restoredCotiz=normalizeArray(d.cotizaciones, cotizaciones);
+        const restoredDevs=normalizeArray(d.devoluciones, devoluciones);
+        const restoredPrecioHist=normalizeArray(d.precioHistorial, precioHistorial);
+        const restoredApartados=normalizeArray(d.apartados, apartados);
+        const restoredRecord=normalizeArray(d.recordatorios, recordatorios);
+        const restoredConteos=normalizeArray(d.conteos, conteos);
+        const restoredUsers=normalizeArray(d.users, users);
+        const restoredOrdenes=normalizeArray(d.ordenesCompra, ordenesCompra);
+        const restoredCuentas=normalizeArray(d.cuentasPagar, cuentasPagar);
+        const restoredAperturas=normalizeArray(d.aperturasC, aperturasC);
+
+        setProducts(restoredProducts);
+        setClientes(restoredClientes);
+        setVentas(restoredVentas);
+        setMovs(restoredMovs);
+        setAbonos(restoredAbonos);
+        setGastos(restoredGastos);
+        setCatG(restoredCatG);
+        setProv(normalizeArray(restoredProv, IPROV));
+        setArqueos(restoredArqueos);
+        setCortesGuardados(restoredCortes);
+        setCotiz(restoredCotiz);
+        setDevs(restoredDevs);
+        setPrecioHist(restoredPrecioHist);
+        if(d.config)setConfig(prev=>({...DEFAULT_CONFIG,...prev,...d.config,respaldoAuto:d.config?.respaldoAuto||prev.respaldoAuto||DEFAULT_CONFIG.respaldoAuto}));
+        setApartados(restoredApartados);
+        setRecord(restoredRecord);
+        setConteos(restoredConteos);
+        if(d.folioNum!==undefined)setFolioNum(normalizeNumber(d.folioNum, folioNum));
+        if(d.cotFolioNum!==undefined)setCotFolioN(normalizeNumber(d.cotFolioNum, cotFolioNum));
+        setUsers(restoredUsers);
+        setOrdenes(restoredOrdenes);
+        setCuentasPagar(restoredCuentas);
+        setAperturasC(restoredAperturas);
+
+        await syncRestoredBackup({
+          products:restoredProducts,clientes:restoredClientes,ventas:restoredVentas,movimientos:restoredMovs,
+          abonos:restoredAbonos,gastos:restoredGastos,catGastos:restoredCatG,proveedores:restoredProv,arqueos:restoredArqueos,
+          cortesGuardados:restoredCortes,cotizaciones:restoredCotiz,devoluciones:restoredDevs,precioHistorial:restoredPrecioHist,
+          config:d.config||config,apartados:restoredApartados,recordatorios:restoredRecord,conteos:restoredConteos,
+          folioNum:normalizeNumber(d.folioNum, folioNum),cotFolioNum:normalizeNumber(d.cotFolioNum, cotFolioNum),
+          users:restoredUsers,ordenesCompra:restoredOrdenes,cuentasPagar:restoredCuentas,aperturasC:restoredAperturas,
+        });
+        showToast(`✅ Respaldo restaurado y sincronizado: ${d._fecha?.slice(0,10)||''}`);
+      }catch(e){
+        console.error('Import backup error:',e);
+        showToast('❌ Error al leer el archivo',C.red);
+      }
     };
     reader.readAsText(file);
   };
@@ -1751,7 +2448,7 @@ const backupSupabase = async () => {
 
   /* ── ETIQUETAS DE PRECIO ── */
   const printEtiquetas=(selectedIds,tamano='med',copias={},savePdf=false)=>{
-    const prods=products.filter(p=>selectedIds.includes(p.id));
+    const prods=safeList(products).filter(p=>selectedIds.includes(p.id));
     if(!prods.length)return showToast('Selecciona al menos un producto',C.red);
     const sizes={labial:{w:35,h:15,fs:5,fsP:7,bh:10},mini:{w:40,h:22,fs:6,fsP:8,bh:14},chico:{w:60,h:35,fs:8,fsP:11,bh:26},med:{w:80,h:50,fs:9,fsP:13,bh:32},grande:{w:100,h:65,fs:10,fsP:16,bh:40}};
     const sz=sizes[tamano]||sizes.med;
@@ -1823,7 +2520,7 @@ ${pdfBanner}<div class="grid">${labels}</div>
 
   /* ── APARTADOS ── */
   const addAptItem=()=>{
-    const prod=products.find(p=>p.id===+aptItemRow.productoId);
+    const prod=safeList(products).find(p=>p.id===+aptItemRow.productoId);
     if(!prod)return showToast('Selecciona un producto',C.red);
     if(+(aptItemRow.cantidad||1)<1)return showToast('Cantidad inválida',C.red);
     const qty=+(aptItemRow.cantidad||1);
@@ -1837,7 +2534,7 @@ ${pdfBanner}<div class="grid">${labels}</div>
     if(!aptForm.clienteId)return showToast('Selecciona un cliente',C.red);
     if(!aptItems.length)return showToast('Agrega al menos un producto',C.red);
     if(!aptForm.anticipo||+aptForm.anticipo<=0)return showToast('Ingresa un anticipo',C.red);
-    const cli=clientes.find(c=>c.id===+aptForm.clienteId);
+    const cli=safeList(clientes).find(c=>c.id===+aptForm.clienteId);
     const precioTotal=aptItems.reduce((a,it)=>a+it.subtotal,0);
     const anticipo=+aptForm.anticipo;
     if(anticipo>precioTotal)return showToast('El anticipo no puede superar el total',C.amber);
@@ -1856,12 +2553,12 @@ ${pdfBanner}<div class="grid">${labels}</div>
     closeModal();
   };
   const cobrarApartado=apt=>{
-    const cli=clientes.find(c=>c.id===apt.clienteId);
+    const cli=safeList(clientes).find(c=>c.id===apt.clienteId);
     if(!cli)return showToast('Cliente no encontrado',C.red);
     const items=apt.items||[];
     const folio=nextFolio();
     const ventaItems=items.map(it=>{
-      const prod=products.find(p=>p.id===it.productoId);
+      const prod=safeList(products).find(p=>p.id===it.productoId);
       return{productoId:it.productoId,productoNombre:it.productoNombre,cantidad:it.cantidad,precio:it.precio,precioOrig:it.precio,costo:prod?.costo||0,subtotal:it.subtotal};
     });
     const totalCosto=ventaItems.reduce((a,it)=>a+it.costo*it.cantidad,0);
@@ -1874,7 +2571,7 @@ ${pdfBanner}<div class="grid">${labels}</div>
     setApartados(as=>as.map(a=>a.id===apt.id?{...a,estado:'entregado',anticipo:apt.precioTotal}:a));
     /* descontar stock por cada item */
     items.forEach(it=>{
-      setProducts(ps=>ps.map(p=>{
+      setProducts(ps=>safeList(ps).map(p=>{
         if(p.id!==it.productoId)return p;
         if((p.variantes||[]).length>0&&it.varianteId)return{...p,variantes:p.variantes.map(v=>v.id===it.varianteId?{...v,stock:Math.max(0,v.stock-it.cantidad)}:v)};
         return{...p,stock:Math.max(0,p.stock-it.cantidad)};
@@ -1884,23 +2581,53 @@ ${pdfBanner}<div class="grid">${labels}</div>
   };
 
   /* ── RECORDATORIOS ── */
-  const saveRecordatorio=()=>{
+  const saveRecordatorio=async()=>{
     if(!recForm.titulo)return showToast('Ingresa un título',C.red);
     if(!recForm.fecha)return showToast('Selecciona una fecha',C.red);
-    const cli=clientes.find(c=>c.id===+recForm.clienteId);
+    const cli=safeList(clientes).find(c=>c.id===+recForm.clienteId);
     const rec={id:uid(),fecha:recForm.fecha,titulo:recForm.titulo,nota:recForm.nota,tipo:recForm.tipo,
       clienteId:recForm.clienteId?+recForm.clienteId:null,clienteNombre:cli?.nombre||'',
       completado:false,creado:today(),cajero:session?.nombre||''};
-    setRecord(rs=>[rec,...rs]);
+    const nuevosRecord=[rec,...safeList(recordatorios)];
+    const stamp=Date.now();
+    setRecord(nuevosRecord);
+    try{
+      localStorage.setItem(KEYS.recordatorios, JSON.stringify(nuevosRecord));
+      setSyncStamp(KEYS.recordatorios, stamp);
+      persistStore(KEYS.recordatorios, nuevosRecord);
+      if(_sbReady && supabase){ enqueueRemoteSync(KEYS.recordatorios, nuevosRecord, stamp); }
+    }catch(e){ console.error('Error sincronizando recordatorio:', e?.message||e); }
     setRecForm({clienteId:'',titulo:'',nota:'',fecha:'',tipo:'llamada'});
     showToast('📅 Recordatorio creado ✓');
     closeModal();
   };
-  const recordatoriosHoy=useMemo(()=>recordatorios.filter(r=>!r.completado&&r.fecha<=today()),[recordatorios]);
+  const markRecordDone=async(id)=>{
+    const nuevosRecord=safeList(recordatorios).map(x=>x.id===id?{...x,completado:true}:x);
+    const stamp=Date.now();
+    setRecord(nuevosRecord);
+    try{
+      localStorage.setItem(KEYS.recordatorios, JSON.stringify(nuevosRecord));
+      setSyncStamp(KEYS.recordatorios, stamp);
+      persistStore(KEYS.recordatorios, nuevosRecord);
+      if(_sbReady && supabase){ enqueueRemoteSync(KEYS.recordatorios, nuevosRecord, stamp); }
+    }catch(e){ console.error('Error completando recordatorio:', e?.message||e); }
+  };
+  const delRecordatorio=async(id)=>{
+    const nuevosRecord=safeList(recordatorios).filter(x=>x.id!==id);
+    const stamp=Date.now();
+    setRecord(nuevosRecord);
+    try{
+      localStorage.setItem(KEYS.recordatorios, JSON.stringify(nuevosRecord));
+      setSyncStamp(KEYS.recordatorios, stamp);
+      persistStore(KEYS.recordatorios, nuevosRecord);
+      if(_sbReady && supabase){ enqueueRemoteSync(KEYS.recordatorios, nuevosRecord, stamp); }
+    }catch(e){ console.error('Error eliminando recordatorio:', e?.message||e); }
+  };
+  const recordatoriosHoy=useMemo(()=>safeList(recordatorios).filter(r=>!r.completado&&r.fecha<=today()),[recordatorios]);
 
   /* ── CONTEO FÍSICO ── */
   const iniciarConteo=()=>{
-    const c={id:uid(),fecha:today(),items:products.map(p=>({productoId:p.id,nombre:p.nombre,categoria:p.categoria,stockSistema:stockTotal(p),stockFisico:''})),estado:'borrador',cajero:session?.nombre||''};
+    const c={id:uid(),fecha:today(),items:safeList(products).map(p=>({productoId:p.id,nombre:p.nombre,categoria:p.categoria,stockSistema:stockTotal(p),stockFisico:''})),estado:'borrador',cajero:session?.nombre||''};
     setConteoActivo(c);
   };
   const finalizarConteo=()=>{
@@ -1910,7 +2637,7 @@ ${pdfBanner}<div class="grid">${labels}</div>
     const guardado={...conteoActivo,items:filled,diferencias:difs.length,estado:'finalizado',fechaCierre:today()};
     setConteos(cs=>[guardado,...cs]);
     /* aplicar ajustes al inventario */
-    setProducts(ps=>ps.map(p=>{
+    setProducts(ps=>safeList(ps).map(p=>{
       const item=filled.find(i=>i.productoId===p.id);
       if(!item||item.stockFisico===item.stockSistema)return p;
       if((p.variantes||[]).length>0)return p; /* variantes: skip auto-adjust */
@@ -1923,20 +2650,20 @@ ${pdfBanner}<div class="grid">${labels}</div>
   /* ── CAMPAÑAS WHATSAPP ── */
   const enviarCampana=(tipo,mensaje)=>{
     let destinatarios=[];
-    if(tipo==='todos')destinatarios=clientes.filter(c=>c.telefono);
-    else if(tipo==='deudores')destinatarios=clientes.filter(c=>{
-      const sp=ventas.filter(v=>v.clienteId===c.id&&v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
+    if(tipo==='todos')destinatarios=safeList(clientes).filter(c=>c.telefono);
+    else if(tipo==='deudores')destinatarios=safeList(clientes).filter(c=>{
+      const sp=safeList(ventas).filter(v=>v.clienteId===c.id&&v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
       return sp>0&&c.telefono;
     });
     else if(tipo==='inactivos'){
       const hace60=new Date();hace60.setDate(hace60.getDate()-60);
       const cutoff=hace60.toISOString().split('T')[0];
-      destinatarios=clientes.filter(c=>{
-        const lastV=ventas.filter(v=>v.clienteId===c.id).sort((a,b)=>b.fecha.localeCompare(a.fecha))[0];
+      destinatarios=safeList(clientes).filter(c=>{
+        const lastV=safeList(ventas).filter(v=>v.clienteId===c.id).sort((a,b)=>b.fecha.localeCompare(a.fecha))[0];
         return(!lastV||lastV.fecha<cutoff)&&c.telefono;
       });
     }
-    else if(tipo==='cumple')destinatarios=clientes.filter(c=>isBirthdayToday(c.fechaNacimiento)&&c.telefono);
+    else if(tipo==='cumple')destinatarios=safeList(clientes).filter(c=>isBirthdayToday(c.fechaNacimiento)&&c.telefono);
     if(!destinatarios.length)return showToast('No hay clientes con teléfono en este segmento',C.amber);
     /* Abrir WhatsApp para el primero; para todos abrir múltiples tabs */
     destinatarios.forEach((c,i)=>{
@@ -2080,33 +2807,61 @@ td{padding:5px 7px;border-bottom:1px solid #f0edf5;vertical-align:middle}
   const changeCotQty=(pid,delta)=>setCotItems(its=>its.map(i=>i.productoId===pid?{...i,cantidad:Math.max(1,i.cantidad+delta)}:i));
   const saveCotizacion=()=>{
     if(!cotItems.length)return showToast('Agrega al menos un producto',C.red);
-    const cli=clientes.find(c=>c.id===+cotCliente);
+    const cli=safeList(clientes).find(c=>c.id===+cotCliente);
     const folio=nextCotFolio();
     const cot={id:uid(),folio,fecha:today(),estado:'activa',
       clienteId:cli?.id||null,clienteNombre:cli?.nombre||'Sin cliente',
       items:cotItems.map(i=>({...i})),
       descuento:+cotDesc||0,descuentoTipo:cotDescTipo,
       total:cotTotal,nota:cotNota,cajero:session?.nombre||''};
-    setCotiz(cs=>[cot,...cs]);
+    const nuevasCot=[cot,...safeList(cotizaciones)];
+    const stamp=Date.now();
+    setCotiz(nuevasCot);
+    try{
+      localStorage.setItem(KEYS.cotizaciones, JSON.stringify(nuevasCot));
+      setSyncStamp(KEYS.cotizaciones, stamp);
+      persistStore(KEYS.cotizaciones, nuevasCot);
+      if(_sbReady && supabase){ enqueueRemoteSync(KEYS.cotizaciones, nuevasCot, stamp); }
+    }catch(e){ console.error('Error sincronizando cotización:', e?.message||e); }
     setCotItems([]);setCotCliente('');setCotDesc('');setCotDescTipo('pct');setCotNota('');
     showToast(`📋 Cotización ${folio} guardada`);
   };
   const convertirCotizacion=cot=>{
-    setPosItems(cot.items.map(i=>({...i})));
-    setPosCliente(cot.clienteId?String(cot.clienteId):'');
-    setPosDesc(String(cot.descuento||0));setPosDescTipo(cot.descuentoTipo||'pct');
+    const itemsSeguro=safeList(cot?.items).filter(Boolean).map(i=>({
+      ...i,
+      itemKey:i?.itemKey||uid(),
+      cantidad:Number(i?.cantidad||0)||1,
+      precio:Number(i?.precio||i?.precioOrig||0)||0,
+      precioOrig:Number(i?.precioOrig||i?.precio||0)||0,
+      productoNombre:i?.productoNombre||i?.nombre||'Producto',
+    }));
+    setPosEditingPrice(null);
+    setPosItems(itemsSeguro);
+    setPosCliente(cot?.clienteId?String(cot.clienteId):'');
+    setPosDesc(String(cot?.descuento||0));setPosDescTipo(cot?.descuentoTipo||'pct');
     setPosPagos([{metodo:'efectivo',monto:''}]);
-    setCotiz(cs=>cs.map(c=>c.id===cot.id?{...c,estado:'convertida'}:c));
+    setCotiz(cs=>safeList(cs).map(c=>c.id===cot.id?{...c,estado:'convertida'}:c));
     setTab('Caja');showToast('Cotización cargada en Caja 🛒');
   };
-  const delCotizacion=id=>askConf('¿Eliminar esta cotización?',()=>{setCotiz(cs=>cs.filter(c=>c.id!==id));showToast('Eliminada',C.red);});
+  const delCotizacion=id=>askConf('¿Eliminar esta cotización?',()=>{
+    const nuevasCot=safeList(cotizaciones).filter(c=>c.id!==id);
+    const stamp=Date.now();
+    setCotiz(nuevasCot);
+    try{
+      localStorage.setItem(KEYS.cotizaciones, JSON.stringify(nuevasCot));
+      setSyncStamp(KEYS.cotizaciones, stamp);
+      persistStore(KEYS.cotizaciones, nuevasCot);
+      if(_sbReady && supabase){ enqueueRemoteSync(KEYS.cotizaciones, nuevasCot, stamp); }
+    }catch(e){ console.error('Error eliminando cotización:', e?.message||e); }
+    showToast('Eliminada',C.red);
+  });
 
   const printCotizacion=cot=>{
     const L=n=>n.toLocaleString('es-HN',{minimumFractionDigits:2});
     const subtotal=cot.items.reduce((a,i)=>a+i.precioOrig*i.cantidad,0);
     const descMonto=cot.descuento>0?(cot.descuentoTipo==='pct'?subtotal*(cot.descuento/100):cot.descuento):0;
     const rows=cot.items.map((it,i)=>{
-      const prod=products.find(p=>p.id===it.productoId||p.nombre===it.productoNombre);
+      const prod=safeList(products).find(p=>p.id===it.productoId||p.nombre===it.productoNombre);
       const fotoHtml=prod?.foto?`<img src="${prod.foto}" style="width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid #ede8f0;display:block" alt="">`
         :`<div style="width:42px;height:42px;border-radius:6px;background:#fce7ef;display:flex;align-items:center;justify-content:center;font-size:18px">🏷️</div>`;
       return`<tr style="background:${i%2===0?'#faf9fb':'#fff'}">
@@ -2182,13 +2937,13 @@ ${cot.nota?`<div class="nota">📝 <strong>Nota:</strong> ${cot.nota}</div>`:''}
     if(itemsDev.some(i=>i.cantDev>i.cantidad))return showToast('Cantidad supera lo vendido',C.red);
     const totalDev=itemsDev.reduce((a,i)=>a+i.precio*i.cantDev,0);
     /* restituir stock */
-    setProducts(ps=>ps.map(p=>{
+    setProducts(ps=>safeList(ps).map(p=>{
       const it=itemsDev.find(i=>i.productoId===p.id);
       return it?{...p,stock:p.stock+it.cantDev}:p;
     }));
     /* registrar movimientos */
     itemsDev.forEach(it=>{
-      const prod=products.find(p=>p.id===it.productoId);
+      const prod=safeList(products).find(p=>p.id===it.productoId);
       const stk=prod?prod.stock:0;
       setMovs(ms=>[{id:uid(),fecha:today(),tipo:'ingreso',productoId:it.productoId,productoNombre:it.productoNombre,cantidad:it.cantDev,nota:`Devolución ${devVenta.folio}${devMotivo?' — '+devMotivo:''}`,stockAntes:stk,stockDespues:stk+it.cantDev,cajero:session?.nombre||''},...ms]);
     });
@@ -2225,11 +2980,13 @@ const reqDelVenta = (v) => {
 const submitAuth = async () => {
   if (deleting) return;
 
-  const u = users.find(
-    x =>
-      x.usuario === authU.trim() &&
-      x.clave === authC.trim() &&
-      x.rol === 'admin'
+  const usersSafe = safeList(users);
+  const ventasSafe = safeList(ventas);
+  const abonosSafe = safeList(abonos);
+  const productsSafe = safeList(products);
+
+  const u = usersSafe.find(
+    x => x?.usuario === authU.trim() && x?.clave === authC.trim() && x?.rol === 'admin'
   );
 
   if (!u) {
@@ -2248,42 +3005,60 @@ const submitAuth = async () => {
 
   try {
     const ventaAEliminar = pendDel;
+    const itemsVenta = safeList(ventaAEliminar?.items);
+    const touchedProductIds = [...new Set(itemsVenta.map(i => String(i?.productoId)).filter(Boolean))];
 
-    const nuevasVentas = ventas.filter(v => v.id !== ventaAEliminar.id);
-    const nuevosAbonos = abonos.filter(a => a.ventaId !== ventaAEliminar.id);
-    const nuevosProductos = products.map(p => {
-      const it = ventaAEliminar.items?.find(i => i.productoId === p.id);
-      return it ? { ...p, stock: p.stock + it.cantidad } : p;
+    const nuevasVentas = ventasSafe.filter(v => v.id !== ventaAEliminar.id);
+    const nuevosAbonos = abonosSafe.filter(a => a.ventaId !== ventaAEliminar.id);
+
+    const nuevosProductos = productsSafe.map(p => {
+      const itemsDeEsteProducto = itemsVenta.filter(i => String(i?.productoId) === String(p?.id));
+      if (!itemsDeEsteProducto.length) return p;
+
+      let next = { ...p };
+      itemsDeEsteProducto.forEach(it => {
+        if ((safeList(next.variantes).length > 0) && it?.varianteId) {
+          next.variantes = safeList(next.variantes).map(v =>
+            String(v?.id) === String(it.varianteId)
+              ? { ...v, stock: Number(v?.stock || 0) + Number(it?.cantidad || 0) }
+              : v
+          );
+          next.stock = safeList(next.variantes).reduce((a, v) => a + Number(v?.stock || 0), 0);
+        } else {
+          next.stock = Number(next?.stock || 0) + Number(it?.cantidad || 0);
+        }
+      });
+      return next;
     });
-
-    if (_sbReady && supabase) {
-      const r1 = await supabase
-        .from('adornarte_store')
-        .upsert({ key: KEYS.ventas, data: nuevasVentas }, { onConflict: 'key' });
-
-      const r2 = await supabase
-        .from('adornarte_store')
-        .upsert({ key: KEYS.abonos, data: nuevosAbonos }, { onConflict: 'key' });
-
-      const r3 = await supabase
-        .from('adornarte_store')
-        .upsert({ key: KEYS.products, data: nuevosProductos }, { onConflict: 'key' });
-
-      if (r1.error || r2.error || r3.error) {
-        throw new Error(
-          r1.error?.message ||
-          r2.error?.message ||
-          r3.error?.message ||
-          'Error al guardar en Supabase'
-        );
-      }
-    }
 
     setVentas(nuevasVentas);
     setAbonos(nuevosAbonos);
     setProducts(nuevosProductos);
 
-    showToast(`Venta ${ventaAEliminar.folio} eliminada`, C.red);
+    try { localStorage.setItem(KEYS.ventas, JSON.stringify(nuevasVentas)); } catch {}
+    try { localStorage.setItem(KEYS.abonos, JSON.stringify(nuevosAbonos)); } catch {}
+    try { await idbSet(KEYS.products, nuevosProductos); } catch {}
+
+    try {
+      persistStore(KEYS.ventas, nuevasVentas);
+      persistStore(KEYS.abonos, nuevosAbonos);
+      persistStore(KEYS.products, nuevosProductos);
+      await Promise.all([
+        deleteCollectionItem(KEYS.ventas, ventaAEliminar.id),
+        upsertProductsByIds(touchedProductIds, nuevosProductos, Date.now()),
+        syncCollectionTable(KEYS.abonos, nuevosAbonos, Date.now(), { prune: true })
+      ]);
+    } catch (e) {
+      console.error('Error sincronizando eliminación:', e?.message || e);
+    }
+
+    showToast(`Venta ${ventaAEliminar.folio} eliminada y stock restaurado`, C.red);
+
+    try {
+      if (typeof logActividad === 'function') {
+        logActividad('venta_eliminada', `Venta ${ventaAEliminar.folio} eliminada`, { ventaId: ventaAEliminar.id, folio: ventaAEliminar.folio }, session?.nombre || '');
+      }
+    } catch {}
 
     setPendDel(null);
     setAuthU('');
@@ -2294,15 +3069,11 @@ const submitAuth = async () => {
     console.error('Error eliminando venta:', e);
     setAuthErr(e?.message || 'No se pudo eliminar');
     showToast(`No se pudo eliminar: ${e?.message || 'Error'}`, C.red);
-
-    setPendDel(null);
-    setAuthU('');
-    setAuthC('');
-    closeModal();
   } finally {
     setDeleting(false);
   }
 };
+
   /* ── CERRAR DÍA / GUARDAR CORTE ── */
   const cerrarDia=()=>{
     const yaGuardado=cortesGuardados.find(c=>c.fecha===corteDate);
@@ -2364,8 +3135,8 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
     if(tab==='Caja'){setTimeout(()=>posBarRef.current?.focus(),120);}
   },[tab]);
   const saveArqueo=()=>{
-    const vHoy=ventas.filter(v=>v.fecha===today()&&v.tipo==='contado');
-    const aHoy=abonos.filter(a=>a.fecha===today());
+    const vHoy=safeList(ventas).filter(v=>v.fecha===today()&&v.tipo==='contado');
+    const aHoy=safeList(abonos).filter(a=>a.fecha===today());
     /* sistema por método — suma pagos array */
     const sumaMetodo=(metodo)=>vHoy.reduce((a,v)=>{
       if(v.pagos?.length){return a+v.pagos.filter(p=>p.metodo===metodo).reduce((s,p)=>s+p.monto,0);}
@@ -2395,30 +3166,30 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 
   /* ── STATS ── */
   const stats=useMemo(()=>{
-    const gCont=ventas.filter(v=>v.tipo==='contado').reduce((a,v)=>a+(v.total-v.totalCosto),0);
-    const gAbon=abonos.reduce((a,ab)=>{const v=ventas.find(x=>x.id===ab.ventaId);if(!v)return a;return a+ab.monto-(v.total>0?(v.totalCosto/v.total)*ab.monto:0);},0);
+    const gCont=safeList(ventas).filter(v=>v.tipo==='contado').reduce((a,v)=>a+(v.total-v.totalCosto),0);
+    const gAbon=abonos.reduce((a,ab)=>{const v=safeList(ventas).find(x=>x.id===ab.ventaId);if(!v)return a;return a+ab.monto-(v.total>0?(v.totalCosto/v.total)*ab.monto:0);},0);
     const totalGastos=gastos.reduce((a,g)=>a+g.monto,0);
     return{
       totalVentas:ventas.reduce((a,v)=>a+v.total,0),
       totalCobrado:ventas.reduce((a,v)=>a+v.abonado,0),
-      totalCredito:ventas.filter(v=>v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0),
+      totalCredito:safeList(ventas).filter(v=>v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0),
       totalGastos,ganancia:gCont+gAbon-totalGastos,
       lowStock:alertasStock.length,
-      ventasHoy:ventas.filter(v=>v.fecha===today()).length,
+      ventasHoy:safeList(ventas).filter(v=>v.fecha===today()).length,
     };
   },[ventas,abonos,gastos,alertasStock]);
 
   /* ── REPORTES ── */
   const reportePeriodo=useCallback((ini,fin)=>{
-    const vR=ventas.filter(v=>v.fecha>=ini&&v.fecha<=fin);
+    const vR=safeList(ventas).filter(v=>v.fecha>=ini&&v.fecha<=fin);
     const gR=gastos.filter(g=>g.fecha>=ini&&g.fecha<=fin);
-    const aR=abonos.filter(a=>a.fecha>=ini&&a.fecha<=fin);
+    const aR=safeList(abonos).filter(a=>a.fecha>=ini&&a.fecha<=fin);
     const totalV=vR.reduce((a,v)=>a+v.total,0);
     const totalCosto=vR.reduce((a,v)=>a+v.totalCosto,0);
     const totalG=gR.reduce((a,g)=>a+g.monto,0);
     const totalA=aR.reduce((a,ab)=>a+ab.monto,0);
     const gCont=vR.filter(v=>v.tipo==='contado').reduce((a,v)=>a+(v.total-v.totalCosto),0);
-    const gAbon=aR.reduce((a,ab)=>{const v=ventas.find(x=>x.id===ab.ventaId);if(!v)return a;return a+ab.monto-(v.total>0?(v.totalCosto/v.total)*ab.monto:0);},0);
+    const gAbon=aR.reduce((a,ab)=>{const v=safeList(ventas).find(x=>x.id===ab.ventaId);if(!v)return a;return a+ab.monto-(v.total>0?(v.totalCosto/v.total)*ab.monto:0);},0);
     const ganancia=gCont+gAbon-totalG;
     /* by product */
     const pp={};
@@ -2429,13 +3200,13 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
     /* descuentos */
     const totalDesc=vR.reduce((a,v)=>{const sb=v.items.reduce((x,i)=>x+i.precioOrig*i.cantidad,0);return a+(sb-v.total);},0);
     /* sin movimiento */
-    const sinMov=products.filter(p=>!vR.some(v=>v.items.some(i=>i.productoId===p.id)));
+    const sinMov=safeList(products).filter(p=>!vR.some(v=>v.items.some(i=>i.productoId===p.id)));
     /* créditos del período */
     const creditosNuevos=vR.filter(v=>v.tipo==='credito');
     const totalCreditosNuevos=creditosNuevos.reduce((a,v)=>a+v.total,0);
     const totalCreditosCobrado=aR.reduce((a,ab)=>a+ab.monto,0); /* abonos = lo cobrado de créditos */
     /* créditos pendientes acumulados (todos los tiempos, no solo el período) */
-    const creditosPendientes=ventas.filter(v=>v.tipo==='credito'&&v.estado==='pendiente');
+    const creditosPendientes=safeList(ventas).filter(v=>v.tipo==='credito'&&v.estado==='pendiente');
     const totalPendienteGlobal=creditosPendientes.reduce((a,v)=>a+v.saldo,0);
     return{vR,gR,aR,totalV,totalCosto,totalG,totalA,ganancia,byPago,totalDesc,sinMov,
       porProducto:Object.values(pp).sort((a,b)=>b.total-a.total),
@@ -2449,8 +3220,8 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 
   /* ── CORTE ── */
   const corte=useMemo(()=>{
-    const vD=ventas.filter(v=>v.fecha===corteDate);
-    const aD=abonos.filter(a=>a.fecha===corteDate);
+    const vD=safeList(ventas).filter(v=>v.fecha===corteDate);
+    const aD=safeList(abonos).filter(a=>a.fecha===corteDate);
     const mD=movs.filter(m=>m.fecha===corteDate);
     const gD=gastos.filter(g=>g.fecha===corteDate);
     const totalV=vD.reduce((a,v)=>a+v.total,0);
@@ -2460,7 +3231,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
     const cobCont=vD.filter(v=>v.tipo==='contado').reduce((a,v)=>a+v.total,0);
     const cobHoy=cobCont+abonosHoy;
     const gCont=vD.filter(v=>v.tipo==='contado').reduce((a,v)=>a+(v.total-v.totalCosto),0);
-    const gAbon=aD.reduce((a,ab)=>{const v=ventas.find(x=>x.id===ab.ventaId);if(!v)return a;return a+ab.monto-(v.total>0?(v.totalCosto/v.total)*ab.monto:0);},0);
+    const gAbon=aD.reduce((a,ab)=>{const v=safeList(ventas).find(x=>x.id===ab.ventaId);if(!v)return a;return a+ab.monto-(v.total>0?(v.totalCosto/v.total)*ab.monto:0);},0);
     const ganancia=gCont+gAbon-totalG;
     const units=vD.reduce((a,v)=>a+v.items.reduce((b,i)=>b+i.cantidad,0),0);
     const pp={};
@@ -2471,8 +3242,8 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
   /* ── FILTERS ── */
   const fp=(()=>{
     const base=search==='__STOCKBAJO__'
-      ?products.filter(p=>p.stockMinimo>0&&p.stock<=p.stockMinimo)
-      :products.filter(p=>p.nombre.toLowerCase().includes(search.toLowerCase())||p.categoria.toLowerCase().includes(search.toLowerCase())||(p.codigoBarras||'').includes(search));
+      ?safeList(products).filter(p=>p.stockMinimo>0&&p.stock<=p.stockMinimo)
+      :safeList(products).filter(p=>p.nombre.toLowerCase().includes(search.toLowerCase())||p.categoria.toLowerCase().includes(search.toLowerCase())||(p.codigoBarras||'').includes(search));
     if(!invSort)return base;
     return [...base].sort((a,b)=>{
       if(invSort==='categoria')return(a.categoria||'').localeCompare(b.categoria||'');
@@ -2482,7 +3253,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       return 0;
     });
   })();
-  const fv=ventas.filter(v=>{
+  const fv=safeList(ventas).filter(v=>{
     const mF=vFiltro==='dia'?v.fecha===(vFiltroFecha||today()):true;
     const mS=!search||v.clienteNombre.toLowerCase().includes(search.toLowerCase())||v.folio.toLowerCase().includes(search.toLowerCase());
     return mF&&mS;
@@ -2492,10 +3263,10 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
     const mS=!search||m.productoNombre.toLowerCase().includes(search.toLowerCase());
     return mF&&mS;
   });
-  const fcred=ventas.filter(v=>v.tipo==='credito');
+  const fcred=safeList(ventas).filter(v=>v.tipo==='credito');
   const fg=gastos.filter(g=>g.descripcion.toLowerCase().includes(search.toLowerCase()));
-  const fc=clientes.filter(c=>c.nombre.toLowerCase().includes(search.toLowerCase()));
-  const posProd=products.filter(p=>!posBusca||p.nombre.toLowerCase().includes(posBusca.toLowerCase())||p.categoria.toLowerCase().includes(posBusca.toLowerCase())||(p.codigoBarras||'').includes(posBusca));
+  const fc=safeList(clientes).filter(c=>c.nombre.toLowerCase().includes(search.toLowerCase()));
+  const posProd=safeList(products).filter(p=>!posBusca||p.nombre.toLowerCase().includes(posBusca.toLowerCase())||p.categoria.toLowerCase().includes(posBusca.toLowerCase())||(p.codigoBarras||'').includes(posBusca));
 
   const tabInfo=TABS.find(t=>t.id===tab)||TABS[0]||{icon:'',label:''};
 
@@ -2541,7 +3312,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
   /* ══════════════════════ MAIN APP ══════════════════════════ */
   return(
     <ThemeCtx.Provider value={{C,S}}>
-    <div style={S.page}>
+    <div style={{...S.page,overflowX:'hidden'}}>
       {toast&&<div style={{position:'fixed',bottom:24,right:24,zIndex:200,background:toast.color,color:'#fff',padding:'11px 20px',borderRadius:13,fontWeight:700,fontSize:13,boxShadow:'0 8px 24px rgba(0,0,0,0.15)',maxWidth:300}}>{toast.msg}</div>}
       {alertasStock.length>0&&tab!=='Inventario'&&!alertaDismissed&&(
         <div style={{position:'fixed',top:68,right:18,zIndex:90,background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:11,padding:'8px 13px',boxShadow:C.shadow,display:'flex',alignItems:'center',gap:8,maxWidth:230}}>
@@ -2555,11 +3326,12 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       )}
 
       {/* ── SIDEBAR ── */}
-      <aside style={S.sidebar}>
+      {isMobile&&mobileMenuOpen&&<div onClick={()=>setMobileMenuOpen(false)} style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.35)',zIndex:34}}/>}
+      <aside style={isMobile?{...S.sidebar,width:250,transform:mobileMenuOpen?'translateX(0)':'translateX(-100%)',transition:'transform .22s ease',zIndex:35}:{...S.sidebar}}>
         <div style={{padding:'14px 12px 10px',borderBottom:`1px solid ${C.border}`}}>
           <div style={{display:'flex',alignItems:'center',gap:8}}>
             <img src={logo} alt="" style={{width:38,height:38,borderRadius:8,objectFit:'contain',border:`2px solid ${C.pinkLight}`,background:'#fff'}}/>
-            <div><div style={{fontWeight:800,fontSize:13,color:C.pink,fontFamily:'Georgia,serif'}}>AdornArte</div><div style={{fontSize:7,color:C.textLight,letterSpacing:'2px'}}>RESALTA TU BELLEZA</div></div>
+            <div><div style={{fontWeight:800,fontSize:isMobile?12:13,color:C.pink,fontFamily:'Georgia,serif'}}>AdornArte</div><div style={{fontSize:7,color:C.textLight,letterSpacing:'2px'}}>RESALTA TU BELLEZA</div></div>
           </div>
           {/* Session info */}
           <div style={{marginTop:8,padding:'6px 9px',background:C.pinkLight,borderRadius:8,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
@@ -2584,7 +3356,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           {TABS.map(t=>{
             const active=tab===t.id;
             const hasBadge=t.id==='Inventario'&&alertasStock.length>0;
-            return<button key={t.id} onClick={()=>{setTab(t.id);setSearch('');}} style={{width:'100%',display:'flex',alignItems:'center',gap:7,padding:'7px 8px',borderRadius:8,border:'none',cursor:'pointer',marginBottom:1,background:active?C.pinkLight:'transparent',color:active?C.pink:C.textMid,fontWeight:active?700:500,fontSize:12.5}}>
+            return<button key={t.id} onClick={()=>{setTab(t.id);setSearch(''); if(isMobile)setMobileMenuOpen(false);}} style={{width:'100%',display:'flex',alignItems:'center',gap:7,padding:'7px 8px',borderRadius:8,border:'none',cursor:'pointer',marginBottom:1,background:active?C.pinkLight:'transparent',color:active?C.pink:C.textMid,fontWeight:active?700:500,fontSize:12.5}}>
               <span style={{fontSize:13,width:17,textAlign:'center'}}>{t.icon}</span>{t.label}
               {hasBadge&&<span style={{marginLeft:'auto',background:C.red,color:'#fff',borderRadius:999,fontSize:9,fontWeight:800,padding:'1px 5px'}}>{alertasStock.length}</span>}
               {active&&!hasBadge&&<span style={{marginLeft:'auto',width:5,height:5,borderRadius:'50%',background:C.pink}}/>}
@@ -2607,9 +3379,9 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       </aside>
 
       {/* ── MAIN ── */}
-      <div style={S.main}>
-        <div style={S.topbar}>
-          <div><div style={{fontSize:17,fontWeight:800,color:C.text}}>{tabInfo.icon} {tabInfo.label}</div><div style={{fontSize:10,color:C.textLight,marginTop:1}}>{new Date().toLocaleDateString('es-HN',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div>
+      <div style={isMobile?{...S.main,marginLeft:0}:{...S.main}}>
+        <div style={isMobile?{...S.topbar,padding:'12px 14px'}:S.topbar}>
+          <div style={{display:'flex',alignItems:'center',gap:10}}>{isMobile&&<button onClick={()=>setMobileMenuOpen(true)} style={{background:C.pinkLight,border:`1px solid ${C.border}`,color:C.pink,borderRadius:10,width:36,height:36,cursor:'pointer',fontSize:18,flexShrink:0}}>☰</button>}<div><div style={{fontSize:17,fontWeight:800,color:C.text}}>{tabInfo.icon} {tabInfo.label}</div><div style={{fontSize:10,color:C.textLight,marginTop:1}}>{new Date().toLocaleDateString('es-HN',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div></div>
           <div style={{display:'flex',gap:8,alignItems:'center'}}>
             {alertasStock.length>0&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:7,padding:'4px 10px',fontSize:10,color:C.red,fontWeight:700}}>⚠️ {alertasStock.length} bajo</div>}
             <div style={{background:C.pinkLight,borderRadius:9,padding:'5px 12px',fontSize:11,color:C.pink,fontWeight:700}}>🌸 {config.nombre}</div>
@@ -2642,7 +3414,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         )}
         {showNotifs&&<div onClick={()=>setShowNotifs(false)} style={{position:'fixed',inset:0,zIndex:199}}/>}
 
-        <div style={S.content}>
+        <div style={isMobile?{...S.content,padding:'14px 12px 84px'}:S.content}>
 
         {/* ── Notificaciones de cumpleaños ── */}
         {cumpleNotis.filter(c=>!cumpleDismissed.includes(c.id)).map(c=>(
@@ -2654,43 +3426,46 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 
 {/* ════════════════ CAJA / POS ════════════════ */}
 {tab==='Caja'&&(
-  <div style={{display:'grid',gridTemplateColumns:'1fr 380px',gap:16,height:'calc(100vh - 130px)',minHeight:500}}>
+  <div style={isMobile?{display:'flex',flexDirection:'column',gap:12,minHeight:'auto'}:{display:'grid',gridTemplateColumns:'1fr 380px',gap:16,height:'calc(100vh - 130px)',minHeight:500}}>
     {/* Left: product selector */}
-    <div style={{display:'flex',flexDirection:'column',gap:10,overflow:'hidden'}}>
-      <div style={{display:'flex',gap:8}}>
+    <div style={isMobile?{display:'flex',flexDirection:'column',gap:10}:{display:'flex',flexDirection:'column',gap:10,overflow:'hidden'}}>
+      <div style={isMobile?{display:'grid',gridTemplateColumns:'1fr',gap:8}:{display:'flex',gap:8}}>
         <div style={{flex:1,position:'relative'}}>
           <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight,fontSize:13}}>🔍</span>
           <input ref={posItemProd} value={posBusca} onChange={e=>setPosBusca(e.target.value)}
             onKeyDown={e=>{
               if(e.key==='Enter'&&posBusca.trim()){
                 /* exact barcode match → add immediately */
-                const byCode=products.find(p=>(p.codigoBarras||'').toLowerCase()===posBusca.trim().toLowerCase());
+                const byCode=safeList(products).find(p=>(p.codigoBarras||'').toLowerCase()===posBusca.trim().toLowerCase());
                 if(byCode){posAddProduct(byCode);setPosBusca('');return;}
                 /* single name match → add */
-                const vis=products.filter(p=>p.nombre.toLowerCase().includes(posBusca.toLowerCase())||p.categoria.toLowerCase().includes(posBusca.toLowerCase())||(p.codigoBarras||'').toLowerCase().includes(posBusca.toLowerCase()));
+                const vis=safeList(products).filter(p=>p.nombre.toLowerCase().includes(posBusca.toLowerCase())||p.categoria.toLowerCase().includes(posBusca.toLowerCase())||(p.codigoBarras||'').toLowerCase().includes(posBusca.toLowerCase()));
                 const avail=vis.filter(p=>stockTotal(p)>0);
                 if(avail.length===1){posAddProduct(avail[0]);setPosBusca('');}
               }
             }}
             placeholder="Buscar o escanear código..." style={{...S.input,paddingLeft:34,marginBottom:0}}/>
         </div>
-        <div style={{position:'relative'}}>
-          <span style={{position:'absolute',left:9,top:'50%',transform:'translateY(-50%)',fontSize:14,color:C.blue,pointerEvents:'none'}}>📷</span>
-          <input ref={posBarRef} value={posBarcode} onChange={e=>setPosBarcode(e.target.value)}
-            onKeyDown={e=>{if(e.key==='Enter'&&posBarcode.trim()){const p=findByBarcode(posBarcode);if(p)posAddProduct(p);setPosBarcode('');posBarRef.current?.focus();}}}
-            placeholder="Escanear barras" style={{...S.input,width:180,marginBottom:0,fontFamily:'monospace',paddingLeft:28,background:'#f0f9ff',borderColor:'#bfdbfe'}}/>
+        <div style={{display:'flex',gap:8,alignItems:'stretch'}}>
+          <div style={{position:'relative',flex:isMobile?1:'unset'}}>
+            <span style={{position:'absolute',left:9,top:'50%',transform:'translateY(-50%)',fontSize:14,color:C.blue,pointerEvents:'none'}}>📷</span>
+            <input ref={posBarRef} value={posBarcode} onChange={e=>setPosBarcode(e.target.value)}
+              onKeyDown={e=>{if(e.key==='Enter'&&posBarcode.trim()){const p=findByBarcode(posBarcode);if(p)posAddProduct(p);setPosBarcode('');posBarRef.current?.focus();}}}
+              placeholder="Escanear barras" style={{...S.input,width:isMobile?'100%':180,marginBottom:0,fontFamily:'monospace',paddingLeft:28,background:'#f0f9ff',borderColor:'#bfdbfe'}}/>
+          </div>
+          <button onClick={()=>startCameraScan('pos')} style={{...S.btnOutline,padding:'0 12px',fontSize:12,minWidth:isMobile?98:92,whiteSpace:'nowrap'}}>📷 Cámara</button>
         </div>
       </div>
       {/* Product grid */}
-      <div style={{flex:1,overflowY:'auto',display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:8,alignContent:'start'}}>
+      <div style={isMobile?{display:'grid',gridTemplateColumns:viewportW<560?'1fr':'repeat(2,minmax(0,1fr))',gap:8,alignContent:'start'}:{flex:1,overflowY:'auto',display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:8,alignContent:'start'}}>
         {posProd.filter(p=>stockTotal(p)>0).map(p=>{
           const st=stockTotal(p);const hasVars=(p.variantes||[]).length>0;
           return(
-          <div key={p.id} onClick={()=>posAddProduct(p)} style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:'10px',cursor:'pointer',boxShadow:C.shadow,transition:'all 0.15s'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.pink;e.currentTarget.style.background=C.pinkLight;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.cardBorder;e.currentTarget.style.background=C.card;}}>
-            <div style={{width:'100%',height:52,borderRadius:8,background:p.foto?'transparent':C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:7,overflow:'hidden'}}>
+          <div key={p.id} onClick={()=>posAddProduct(p)} style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:isMobile?'8px':'10px',cursor:'pointer',boxShadow:C.shadow,transition:'all 0.15s',minHeight:isMobile?104:'auto'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.pink;e.currentTarget.style.background=C.pinkLight;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.cardBorder;e.currentTarget.style.background=C.card;}}>
+            <div style={{width:'100%',height:52,borderRadius:8,background:p.foto?'transparent':C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:isMobile?5:7,overflow:'hidden'}}>
               {p.foto?<img src={p.foto} alt="" style={{width:'100%',height:'100%',objectFit:'cover',borderRadius:8}}/>:<span style={{fontSize:22}}>🏷️</span>}
             </div>
-            <div style={{fontWeight:700,fontSize:11,color:C.text,marginBottom:3,lineHeight:1.3}}>{p.nombre}</div>
+            <div style={{fontWeight:700,fontSize:isMobile?10:11,color:C.text,marginBottom:2,lineHeight:1.2,minHeight:isMobile?24:'auto'}}>{p.nombre}</div>
             <div style={{fontWeight:800,fontSize:13,color:C.pink}}>{fmt(p.precio)}</div>
             <div style={{fontSize:10,color:C.textLight}}>Stock: {st}{hasVars&&<span style={{marginLeft:4,background:C.purpleLight,color:C.purple,borderRadius:4,padding:'1px 4px',fontSize:9,fontWeight:700}}>VAR</span>}</div>
             {st<=(p.stockMinimo||0)&&<div style={{fontSize:9,color:C.red,fontWeight:700,marginTop:2}}>⚠️ BAJO</div>}
@@ -2718,10 +3493,10 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
                 <div style={{fontWeight:600,fontSize:12,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{it.productoNombre}{it.esEspecial&&<span style={{marginLeft:5,fontSize:9,background:C.purpleLight,color:C.purple,borderRadius:4,padding:'1px 4px',fontWeight:700}}>VIP</span>}{it.esEditado&&<span style={{marginLeft:4,fontSize:9,background:C.amberLight,color:C.amber,borderRadius:4,padding:'1px 4px',fontWeight:700}}>✏️</span>}</div>
                 <div style={{display:'flex',alignItems:'center',gap:5,marginTop:2}}>
                   {posEditingPrice?.itemKey===it.itemKey?(
-                    <input autoFocus type="number" min="0" value={posEditingPrice.val}
+                    <input autoFocus type="number" min="0" value={posEditingPrice?.val ?? ''}
                       onChange={e=>setPosEditingPrice(p=>({...p,val:e.target.value}))}
-                      onBlur={()=>{posChangeItemPrice(it.itemKey,posEditingPrice.val);setPosEditingPrice(null);}}
-                      onKeyDown={e=>{if(e.key==='Enter'||e.key==='Escape'){posChangeItemPrice(it.itemKey,posEditingPrice.val);setPosEditingPrice(null);}}}
+                      onBlur={()=>{const valActual=posEditingPrice?.val ?? it.precio; posChangeItemPrice(it.itemKey,valActual);setPosEditingPrice(null);}}
+                      onKeyDown={e=>{if(e.key==='Enter'||e.key==='Escape'){const valActual=posEditingPrice?.val ?? it.precio; posChangeItemPrice(it.itemKey,valActual);setPosEditingPrice(null);}}}
                       style={{width:72,padding:'2px 6px',fontSize:12,fontWeight:700,border:`2px solid ${C.pink}`,borderRadius:6,outline:'none',color:C.pink}}/>
                   ):(
                     <button onClick={()=>setPosEditingPrice({itemKey:it.itemKey,val:String(it.precio)})}
@@ -2750,7 +3525,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:7,marginBottom:8}}>
           <div><label style={{...S.label,fontSize:10}}>Cliente</label>
           <select value={posCliente} onChange={e=>{setPosCliente(e.target.value);setPosUsePuntos(false);}} style={{...S.input,padding:'7px 10px',fontSize:12,cursor:'pointer'}}>
-            <option value="">Sin cliente</option>{clientes.map(c=><option key={c.id} value={c.id}>{c.nombre}{isBirthdayToday(c.fechaNacimiento)?' 🎂':''}</option>)}
+            <option value="">Sin cliente</option>{safeList(clientes).map(c=><option key={c.id} value={c.id}>{c.nombre}{isBirthdayToday(c.fechaNacimiento)?' 🎂':''}</option>)}
           </select></div>
           <div><label style={{...S.label,fontSize:10}}>Tipo</label>
           <div style={{display:'flex',gap:4}}>
@@ -2876,7 +3651,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
     {(()=>{
       const now=new Date();
       const prefix=`${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
-      const ventasMes=ventas.filter(v=>v.fecha.startsWith(prefix)).reduce((a,v)=>a+v.total,0);
+      const ventasMes=safeList(ventas).filter(v=>v.fecha.startsWith(prefix)).reduce((a,v)=>a+v.total,0);
       const meta=config.metaVentas||0;
       const pctMeta=meta>0?Math.min(100,Math.round((ventasMes/meta)*100)):0;
       const colorMeta=pctMeta>=100?C.green:pctMeta>=70?C.amber:C.pink;
@@ -2901,7 +3676,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
     })()}
     {alertasStock.length>0&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:12,padding:'12px 16px',marginBottom:16}}>
       <p style={{fontWeight:700,color:C.red,fontSize:12,marginBottom:7}}>⚠️ Productos con stock bajo o agotado</p>
-      <div style={{display:'flex',flexWrap:'wrap',gap:5}}>{alertasStock.map(p=><span key={p.id} style={{background:'#fff',border:`1px solid ${C.redBorder}`,borderRadius:7,padding:'3px 10px',fontSize:11,color:C.red,fontWeight:600}}>{p.nombre} — {p.stock}/{p.stockMinimo}</span>)}</div>
+      <div style={{display:'flex',flexWrap:'wrap',gap:5}}>{safeList(alertasStock).map(p=><span key={p.id} style={{background:'#fff',border:`1px solid ${C.redBorder}`,borderRadius:7,padding:'3px 10px',fontSize:11,color:C.red,fontWeight:600}}>{p.nombre} — {p.stock}/{p.stockMinimo}</span>)}</div>
     </div>}
     <div style={{display:'grid',gridTemplateColumns:'1.3fr 1fr',gap:14}}>
       <div>
@@ -2989,40 +3764,72 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 {/* ════════════════ INVENTARIO ════════════════ */}
 {tab==='Inventario'&&(
   <div>
-    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:13}}>
-      <div style={{display:'flex',alignItems:'center',gap:8}}>
-        <p style={{color:C.textMid,fontSize:12}}>{products.length} productos · Valor: <strong style={{color:C.pink}}>{fmt(products.reduce((a,p)=>a+p.precio*p.stock,0))}</strong></p>
-        {/* Filtro stock bajo */}
+    <div style={{display:'flex',justifyContent:'space-between',alignItems:isMobile?'stretch':'center',flexDirection:isMobile?'column':'row',gap:isMobile?10:0,marginBottom:13}}>
+      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+        <p style={{color:C.textMid,fontSize:12}}>{products.length} productos · Valor: <strong style={{color:C.pink}}>{fmt(products.reduce((a,p)=>a+p.precio*stockTotal(p),0))}</strong></p>
         <button
           onClick={()=>setSearch(s=>s==='__STOCKBAJO__'?'':'__STOCKBAJO__')}
           style={{display:'flex',alignItems:'center',gap:5,padding:'5px 11px',borderRadius:8,border:`2px solid ${search==='__STOCKBAJO__'?C.red:C.border}`,background:search==='__STOCKBAJO__'?C.redLight:'transparent',color:search==='__STOCKBAJO__'?C.red:C.textMid,fontWeight:search==='__STOCKBAJO__'?700:500,fontSize:11,cursor:'pointer',whiteSpace:'nowrap'}}>
           ⚠️ Stock Bajo {alertasStock.length>0&&<span style={{background:search==='__STOCKBAJO__'?C.red:'#fca5a5',color:'#fff',borderRadius:999,fontSize:9,fontWeight:800,padding:'1px 5px'}}>{alertasStock.length}</span>}
         </button>
       </div>
-      <div style={{display:'flex',gap:7}}>
+      <div style={{display:'flex',gap:7,flexWrap:'wrap'}}>
         <button style={{...S.btnSm,fontSize:11,background:C.purpleLight,color:C.purple}} onClick={()=>setModal('etiquetas')}>🏷️ Etiquetas</button>
         <button style={{...S.btnGreen,fontSize:12}} onClick={()=>setCsvImportModal(true)}>📥 Importar CSV</button>
         <button style={S.btn} onClick={openAddP}>+ Nuevo Producto</button>
       </div>
     </div>
-    <div style={{display:'flex',gap:8,marginBottom:12,alignItems:'center'}}>
-      <div style={{position:'relative',flex:1}}>
-        <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight,fontSize:12}}>🔍</span>
-        <input style={S.searchBar} value={search==='__STOCKBAJO__'?'':search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por nombre, categoría o código..."/>
-        {search==='__STOCKBAJO__'&&<span style={{position:'absolute',right:12,top:'50%',transform:'translateY(-50%)',fontSize:11,color:C.red,fontWeight:700,pointerEvents:'none'}}>⚠️ Filtrando stock bajo</span>}
+    {isMobile?(
+      <div>
+        <div style={{position:'relative',marginBottom:12}}>
+          <span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight,fontSize:13}}>🔍</span>
+          <input style={S.searchBar} value={search==='__STOCKBAJO__'?'':search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar por nombre, categoría o código..." />
+        </div>
+        <div style={{display:'grid',gap:10,paddingBottom:96}}>
+          {fp.map(p=>{
+            const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
+            const low=p.stockMinimo>0&&stockTotal(p)<=p.stockMinimo;
+            const prov=proveedoresSafe.find(x=>x.id===p.proveedorId);
+            return(
+              <div key={p.id} style={{...S.card,padding:12,border:low?`1px solid ${C.redBorder}`:`1px solid ${C.cardBorder}`}}>
+                <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
+                  {p.foto?<img src={p.foto} alt="" style={{width:56,height:56,borderRadius:10,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:56,height:56,borderRadius:10,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22}}>🏷️</div>}
+                  <div style={{flex:1,minWidth:0}}>
+                    <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                      <div style={{fontWeight:800,fontSize:14,color:C.text}}>{p.nombre}</div>
+                      {low&&<span style={{fontSize:10,background:C.redLight,color:C.red,borderRadius:6,padding:'2px 6px',fontWeight:800}}>⚠️ Bajo</span>}
+                    </div>
+                    <div style={{fontSize:11,color:C.textLight,marginTop:2,fontFamily:'monospace'}}>{p.codigoBarras||'Sin código'}</div>
+                    <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:6}}>
+                      <Badge text={p.categoria||'—'} color={C.purple} bg={C.purpleLight}/>
+                      <Badge text={`Stock ${stockTotal(p)}`} color={stockTotal(p)<=(p.stockMinimo||0)?C.red:stockTotal(p)<20?C.amber:C.green} bg={stockTotal(p)<=(p.stockMinimo||0)?C.redLight:stockTotal(p)<20?C.amberLight:C.greenLight}/>
+                    </div>
+                    <div style={{display:'grid',gridTemplateColumns:'repeat(3,minmax(0,1fr))',gap:8,marginTop:8}}>
+                      <div><div style={{fontSize:10,color:C.textLight}}>Precio</div><div style={{fontWeight:800,color:C.pink,fontSize:13}}>{fmt(p.precio)}</div></div>
+                      <div><div style={{fontSize:10,color:C.textLight}}>Costo</div><div style={{fontWeight:700,color:C.text,fontSize:12}}>{fmt(p.costo)}</div></div>
+                      <div><div style={{fontSize:10,color:C.textLight}}>Margen</div><div style={{fontWeight:800,color:Number(mg)>=30?C.green:C.amber,fontSize:12}}>{mg}%</div></div>
+                    </div>
+                    <div style={{fontSize:11,color:C.textMid,marginTop:6}}>Proveedor: {prov?.nombre||'—'}</div>
+                  </div>
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(4,minmax(0,1fr))',gap:8,marginTop:10}}>
+                  <button style={{...S.btnSm,padding:'8px 6px',fontSize:11}} onClick={()=>openEditP(p)}>✏️</button>
+                  <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.greenLight,color:C.green}} onClick={()=>{setMovForm({tipo:'ingreso',productoId:String(p.id),cantidad:'',nota:'',fecha:today()});setModal('ingresoRapido');}}>➕</button>
+                  <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.amberLight,color:C.amber}} onClick={()=>{setEdit(p);setModal('historialPrecios');}}>📈</button>
+                  <button style={{...S.btnSm,padding:'8px 6px',fontSize:11,background:C.redLight,color:C.red}} onClick={()=>delP(p.id)}>🗑️</button>
+                </div>
+              </div>
+            );
+          })}
+          {fp.length===0&&<div style={{...S.card,padding:22,textAlign:'center',color:C.textLight}}>Sin productos</div>}
+        </div>
       </div>
-      <div style={{display:'flex',alignItems:'center',gap:5,flexShrink:0}}>
-        <span style={{fontSize:11,color:C.textMid,whiteSpace:'nowrap'}}>Ordenar:</span>
-        {[['','Por defecto'],['categoria','Categoría'],['nombre','Nombre'],['precio','Precio ↓'],['stock','Stock ↓']].map(([v,l])=>(
-          <button key={v} onClick={()=>setInvSort(v)} style={{...S.btnSm,fontSize:10,background:invSort===v?C.purple:C.purpleLight,color:invSort===v?'#fff':C.purple,padding:'4px 9px'}}>{l}</button>
-        ))}
-      </div>
-    </div>
+    ):(
     <div style={S.card}><table style={S.table}><thead><tr>{['','Producto','Código','Cat.','Proveedor','Stock','Precio','Costo','Margen','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{fp.map(p=>{
       const mg=p.precio>0?((p.precio-p.costo)/p.precio*100).toFixed(0):0;
       const low=p.stockMinimo>0&&p.stock<=p.stockMinimo;
-      const prov=proveedores.find(x=>x.id===p.proveedorId);
+      const prov=proveedoresSafe.find(x=>x.id===p.proveedorId);
       return<tr key={p.id} style={{background:low?'rgba(220,38,38,0.02)':''}} onMouseEnter={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.05)':'#faf9fb'} onMouseLeave={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.02)':''}>
         <td style={{...S.td,width:38,padding:'6px 5px'}}>{p.foto?<img src={p.foto} alt="" style={{width:32,height:32,borderRadius:7,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:32,height:32,borderRadius:7,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🏷️</div>}</td>
         <td style={{...S.td,fontWeight:700,fontSize:12}}>{p.nombre}{low&&<span style={{marginLeft:5,fontSize:9,background:C.redLight,color:C.red,borderRadius:5,padding:'1px 4px',fontWeight:700}}>⚠️</span>}</td>
@@ -3034,16 +3841,16 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           {(p.variantes||[]).length>0&&<span style={{marginLeft:5,fontSize:9,background:C.purpleLight,color:C.purple,borderRadius:4,padding:'1px 5px',fontWeight:700}}>VAR {p.variantes.length}</span>}
         </td>
         <td style={{...S.td,fontWeight:700,color:C.pink}}>{fmt(p.precio)}</td>
-        <td style={{...S.td,color:C.textMid,fontSize:12}}>{fmt(p.costo)}</td>
-        <td style={{...S.td,fontWeight:700,color:C.green,fontSize:12}}>{mg}%</td>
-        <td style={S.td}>
-          <IBtn icon="📦" title="Ingresar stock" color={C.green} bg={C.greenLight} onClick={()=>openIngresoRapido(p)}/>
-          <IBtn icon="📈" title="Historial de precios" color={C.amber} bg={C.amberLight} onClick={()=>{setEdit(p);setModal('historialPrecios');}}/>
-          <IBtn icon="✏️" onClick={()=>openEditP(p)}/>
-          <IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>delP(p.id)}/>
+        <td style={{...S.td,fontWeight:700}}>{fmt(p.costo)}</td>
+        <td style={S.td}><Badge text={`${mg}%`} color={mg>=30?C.green:C.amber} bg={mg>=30?C.greenLight:C.amberLight}/></td>
+        <td style={{...S.td,whiteSpace:'nowrap'}}>
+          <button style={S.btnSm} onClick={()=>openEditP(p)}>Editar</button>
+          <button style={{...S.btnSm,background:C.greenLight,color:C.green,borderColor:C.greenBorder}} onClick={()=>{setMovForm({tipo:'ingreso',productoId:String(p.id),cantidad:'',nota:'',fecha:today()});setModal('ingresoRapido');}}>+Stock</button>
+          <button style={{...S.btnSm,background:C.redLight,color:C.red,borderColor:C.redBorder}} onClick={()=>askConf(`¿Eliminar "${p.nombre}"?`,()=>delP(p.id),C.red)}>Eliminar</button>
         </td>
       </tr>;
     })}{fp.length===0&&<tr><td colSpan={10} style={{...S.td,textAlign:'center',color:C.textLight,padding:'22px'}}>Sin productos</td></tr>}</tbody></table></div>
+    )}
   </div>
 )}
 
@@ -3083,12 +3890,45 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       </div>
     </div>
     <div style={{position:'relative',marginBottom:12}}><span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight}}>🔍</span><input style={S.searchBar} value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar folio, cliente..."/></div>
-    <div style={S.card}><table style={S.table}><thead><tr>{['Folio','Fecha','Cliente','Cajero','Tipo','Pago','Desc.','Total','Estado','Nota','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
+    {isMobile?(
+      <div style={{display:'grid',gap:10}}>
+        {fv.length===0&&<div style={{...S.card,padding:'18px',textAlign:'center',color:C.textLight}}>Sin ventas</div>}
+        {fv.map(v=>(
+          <div key={v.id} style={{...S.card,padding:'12px'}}>
+            <div style={{display:'flex',justifyContent:'space-between',gap:10,alignItems:'flex-start',marginBottom:8}}>
+              <div>
+                <div style={{fontWeight:800,fontSize:12,color:C.text}}>{v.folio}</div>
+                <div style={{fontSize:10,color:C.textLight}}>{v.fecha}</div>
+              </div>
+              <div style={{fontWeight:800,color:C.pink}}>{fmt(v.total)}</div>
+            </div>
+            <div style={{fontWeight:700,fontSize:13,marginBottom:4}}>{v.clienteNombre}</div>
+            <div style={{fontSize:11,color:C.textMid,marginBottom:8}}>{(v.items||[]).length?(v.items||[]).map(i=>`${i.productoNombre} ×${i.cantidad}`).join(', '):'—'}</div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:6,marginBottom:8}}>
+              <Badge text={v.tipo==='credito'?'Crédito':'Contado'} color={v.tipo==='credito'?C.amber:C.green} bg={v.tipo==='credito'?C.amberLight:C.greenLight} border={v.tipo==='credito'?C.amberBorder:C.greenBorder}/>
+              <Badge text={v.estado==='pagada'?'✅ Pagada':'⏳ Pend.'} color={v.estado==='pagada'?C.green:C.amber} bg={v.estado==='pagada'?C.greenLight:C.amberLight} border={v.estado==='pagada'?C.greenBorder:C.amberBorder}/>
+              <span style={{fontSize:10,color:C.textMid,alignSelf:'center'}}>{v.cajero||'—'}</span>
+            </div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:8}}>
+              <IBtn icon="🖨️" onClick={()=>printV(v,clientes,config)}/>
+              <IBtn icon="📄" title="Exportar PDF" color={C.red} bg={C.redLight} onClick={()=>exportPDFVenta(v,clientes,config)}/>
+              <IBtn icon="👁" onClick={()=>{setEdit(v);setModal('viewV');}}/>
+              {config.whatsappNumero&&<IBtn icon="💬" title="Enviar recibo por WhatsApp" color={C.green} bg={C.greenLight} onClick={()=>compartirTicketWhatsApp(v)}/>}
+              {v.tipo==='credito'&&v.estado==='pendiente'&&<IBtn icon="💵" color={C.amber} bg={C.amberLight} onClick={()=>openAbono(v)}/>}
+              {['admin','supervisor'].includes(session?.rol)&&<IBtn icon="↩️" title="Devolución" color={C.teal} bg={C.tealLight} onClick={()=>openDevolucion(v)}/>}
+              {session.rol==='admin'&&<IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>reqDelVenta(v)}/>}
+            </div>
+          </div>
+        ))}
+      </div>
+    ):(
+    <div style={S.card}><table style={S.table}><thead><tr>{['Folio','Fecha','Cliente','Productos','Cajero','Tipo','Pago','Desc.','Total','Estado','Nota','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
     <tbody>{fv.map(v=>(
       <tr key={v.id} onMouseEnter={e=>e.currentTarget.style.background=C.pinkLight} onMouseLeave={e=>e.currentTarget.style.background=''}>
         <td style={{...S.td,fontWeight:700,fontSize:10,color:C.textMid}}>{v.folio}</td>
         <td style={{...S.td,fontSize:10,color:C.textMid}}>{v.fecha}</td>
         <td style={{...S.td,fontWeight:600,fontSize:12}}>{v.clienteNombre}</td>
+        <td style={{...S.td,fontSize:10,color:C.textMid,maxWidth:170,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}} title={(v.items||[]).map(i=>`${i.productoNombre} ×${i.cantidad}`).join(', ')}>{(v.items||[]).length?(v.items||[]).map(i=>`${i.productoNombre} ×${i.cantidad}`).join(', '):'—'}</td>
         <td style={{...S.td,fontSize:10,color:C.textMid}}>{v.cajero||'—'}</td>
         <td style={S.td}><Badge text={v.tipo==='credito'?'Crédito':'Contado'} color={v.tipo==='credito'?C.amber:C.green} bg={v.tipo==='credito'?C.amberLight:C.greenLight} border={v.tipo==='credito'?C.amberBorder:C.greenBorder}/></td>
         <td style={{...S.td,fontSize:11}}>{v.pagos?.length>1?'💰 Mixto':v.formaPago==='efectivo'?'💵 Efect.':v.formaPago==='tarjeta'?'💳 Tarjeta':v.formaPago==='transferencia'?'🏦 Transfer.':'—'}</td>
@@ -3106,13 +3946,14 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           {session.rol==='admin'&&<IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>reqDelVenta(v)}/>}
         </td>
       </tr>
-    ))}{fv.length===0&&<tr><td colSpan={11} style={{...S.td,textAlign:'center',color:C.textLight,padding:'22px'}}>Sin ventas</td></tr>}</tbody></table></div>
+    ))}{fv.length===0&&<tr><td colSpan={12} style={{...S.td,textAlign:'center',color:C.textLight,padding:'22px'}}>Sin ventas</td></tr>}</tbody></table></div>
+    )}
   </div>
 )}
 
 {/* ════════════════ COTIZACIONES ════════════════ */}
 {tab==='Cotizaciones'&&(
-  <div style={{display:'grid',gridTemplateColumns:'1fr 360px',gap:14}}>
+  <div style={isMobile?{display:'grid',gridTemplateColumns:'1fr',gap:12}:{display:'grid',gridTemplateColumns:'1fr 360px',gap:14}}>
     {/* Panel izquierdo: crear cotización */}
     <div>
       <h3 style={{fontSize:13,fontWeight:800,marginBottom:12}}>📋 Nueva Cotización</h3>
@@ -3122,7 +3963,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         <input value={cotBusca} onChange={e=>setCotBusca(e.target.value)} placeholder="Buscar producto para agregar..." style={{...S.input,paddingLeft:34}}/>
       </div>
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(130px,1fr))',gap:7,marginBottom:14,maxHeight:200,overflowY:'auto'}}>
-        {products.filter(p=>!cotBusca||p.nombre.toLowerCase().includes(cotBusca.toLowerCase())||p.categoria.toLowerCase().includes(cotBusca.toLowerCase())).map(p=>(
+        {safeList(products).filter(p=>!cotBusca||p.nombre.toLowerCase().includes(cotBusca.toLowerCase())||p.categoria.toLowerCase().includes(cotBusca.toLowerCase())).map(p=>(
           <div key={p.id} onClick={()=>addCotItem(p)} style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:10,padding:'9px',cursor:'pointer',textAlign:'center'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.pink;e.currentTarget.style.background=C.pinkLight;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.cardBorder;e.currentTarget.style.background=C.card;}}>
             <div style={{fontSize:11,fontWeight:700,marginBottom:2}}>{p.nombre}</div>
             <div style={{fontSize:12,fontWeight:800,color:C.pink}}>{fmt(p.precio)}</div>
@@ -3153,7 +3994,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginTop:10}}>
           <div><label style={S.label}>Cliente</label>
           <select value={cotCliente} onChange={e=>setCotCliente(e.target.value)} style={{...S.input,cursor:'pointer'}}>
-            <option value="">Sin cliente</option>{clientes.map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
+            <option value="">Sin cliente</option>{safeList(clientes).map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
           </select></div>
           <div style={{display:'grid',gridTemplateColumns:'70px 1fr',gap:6}}>
             <div><label style={S.label}>Desc.</label>
@@ -3285,17 +4126,17 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 
 {/* ════════════════ PROVEEDORES ════════════════ */}
 {tab==='Proveedores'&&(()=>{
-  const totalDeuda=cuentasPagar.filter(c=>c.estado==='pendiente').reduce((a,c)=>a+c.saldo,0);
-  const cpFilt=cuentasPagar.filter(c=>cpFiltro==='todas'||c.estado===cpFiltro);
+  const cuentasPagarSafe=safeList(cuentasPagar); const productsSafe=safeList(products); const totalDeuda=cuentasPagarSafe.filter(c=>c?.estado==='pendiente').reduce((a,c)=>a+Number(c?.saldo||0),0);
+  const cpFilt=cuentasPagarSafe.filter(c=>cpFiltro==='todas'||c?.estado===cpFiltro);
   const saveCuentaPagar=()=>{
     if(!cpForm.proveedorId)return showToast('Selecciona un proveedor',C.red);
     if(!cpForm.concepto)return showToast('Ingresa un concepto',C.red);
     if(!cpForm.monto||+cpForm.monto<=0)return showToast('Monto inválido',C.red);
-    const prov=proveedores.find(p=>p.id===+cpForm.proveedorId);
+    const prov=safeList(proveedoresSafe).find(p=>p.id===+cpForm.proveedorId);
     const cp={id:uid(),fecha:today(),proveedorId:+cpForm.proveedorId,proveedorNombre:prov?.nombre||'',
       concepto:cpForm.concepto,monto:+cpForm.monto,saldo:+cpForm.monto,
       fechaVence:cpForm.fechaVence,nota:cpForm.nota,estado:'pendiente',cajero:session?.nombre||''};
-    setCuentasPagar(cs=>[cp,...cs]);
+    safeSetList(setCuentasPagar, cs=>[cp,...cs]);
     setCpForm({proveedorId:'',concepto:'',monto:'',fechaVence:'',nota:''});
     showToast(`✅ Cuenta por pagar registrada — ${fmt(cp.monto)}`);
     closeModal();
@@ -3303,13 +4144,13 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
   return<div>
     {/* Header proveedores */}
     <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:13}}>
-      <p style={{color:C.textMid,fontSize:12}}>{proveedores.length} proveedores</p>
+      <p style={{color:C.textMid,fontSize:12}}>{proveedoresSafe.length} proveedores</p>
       <button style={S.btn} onClick={openAddProv}>+ Nuevo Proveedor</button>
     </div>
     <div style={{display:'flex',flexDirection:'column',gap:10,marginBottom:20}}>
-      {proveedores.map(p=>{
-        const prods=products.filter(x=>x.proveedorId===p.id);
-        const deudaP=cuentasPagar.filter(c=>c.proveedorId===p.id&&c.estado==='pendiente').reduce((a,c)=>a+c.saldo,0);
+      {proveedoresSafe.map(p=>{
+        const prods=productsSafe.filter(x=>x?.proveedorId===p.id);
+        const deudaP=cuentasPagarSafe.filter(c=>c?.proveedorId===p.id&&c?.estado==='pendiente').reduce((a,c)=>a+Number(c?.saldo||0),0);
         return<div key={p.id} style={{background:C.card,border:`1px solid ${deudaP>0?C.redBorder:C.cardBorder}`,borderRadius:13,padding:'13px 16px',boxShadow:C.shadow}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
@@ -3337,7 +4178,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           {p.notas&&<div style={{marginTop:8,fontSize:11,color:C.textMid,background:'#faf9fb',borderRadius:7,padding:'5px 9px'}}>📝 {p.notas}</div>}
         </div>;
       })}
-      {proveedores.length===0&&<p style={{textAlign:'center',color:C.textLight,padding:'26px',fontSize:13}}>Sin proveedores</p>}
+      {proveedoresSafe.length===0&&<p style={{textAlign:'center',color:C.textLight,padding:'26px',fontSize:13}}>Sin proveedores</p>}
     </div>
 
     {/* ══ CUENTAS POR PAGAR ══ */}
@@ -3354,7 +4195,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         {['pendiente','pagada','todas'].map(f=>(
           <button key={f} onClick={()=>setCpFiltro(f)} style={{...S.btnSm,fontSize:10,
             background:cpFiltro===f?C.blue:C.blueLight,color:cpFiltro===f?'#fff':C.blue}}>
-            {f.charAt(0).toUpperCase()+f.slice(1)} {f==='todas'?cuentasPagar.length:cuentasPagar.filter(c=>c.estado===f).length}
+            {f.charAt(0).toUpperCase()+f.slice(1)} {f==='todas'?cuentasPagar.length:safeList(cuentasPagar).filter(c=>c.estado===f).length}
           </button>
         ))}
       </div>
@@ -3411,7 +4252,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
           <label style={S.label}>Proveedor *</label>
           <select value={cpForm.proveedorId} onChange={e=>setCpForm(f=>({...f,proveedorId:e.target.value}))} style={{...S.input,cursor:'pointer'}}>
             <option value="">Seleccionar proveedor...</option>
-            {proveedores.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+            {proveedoresSafe.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
           </select>
         </div>
         <Fld label="Concepto *" value={cpForm.concepto} onChange={e=>setCpForm(f=>({...f,concepto:e.target.value}))} placeholder="Ej: Factura #1234, Mercancía agosto..."/>
@@ -3624,7 +4465,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     <div style={{position:'relative',marginBottom:12}}><span style={{position:'absolute',left:11,top:'50%',transform:'translateY(-50%)',color:C.textLight}}>🔍</span><input style={S.searchBar} value={search} onChange={e=>setSearch(e.target.value)} placeholder="Buscar..."/></div>
     <div style={{display:'flex',flexDirection:'column',gap:9}}>
       {fc.map(c=>{
-        const hist=ventas.filter(v=>v.clienteId===c.id);
+        const hist=safeList(ventas).filter(v=>v.clienteId===c.id);
         const tG=hist.reduce((a,v)=>a+v.total,0);
         const sP=hist.filter(v=>v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
         const esCumple=isBirthdayToday(c.fechaNacimiento);
@@ -3837,7 +4678,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     ):(
       /* Formulario de edición */
       <div style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:13,padding:'18px 20px',boxShadow:C.shadow}}>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:11}}>
+        <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'1fr 1fr',gap:11,paddingBottom:isMobile?80:0}}>
           <div style={{gridColumn:'1/-1'}}><Fld label="🌸 Nombre del Negocio *" value={configForm.nombre} onChange={e=>setConfigForm(f=>({...f,nombre:e.target.value}))} placeholder="Ej: AdornArte"/></div>
           <Fld label="✨ Slogan" value={configForm.slogan} onChange={e=>setConfigForm(f=>({...f,slogan:e.target.value}))} placeholder="Ej: Resalta Tu Belleza"/>
           <Fld label="📄 RTN" value={configForm.rtn} onChange={e=>setConfigForm(f=>({...f,rtn:e.target.value}))} placeholder="0000-0000-000000"/>
@@ -3895,7 +4736,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
               <div style={{gridColumn:'1/-1',marginTop:6,display:'flex',alignItems:'center',justifyContent:'space-between',background:'#fff3cd',border:'1px solid #ffc107',borderRadius:9,padding:'10px 14px'}}>
                 <div>
                   <p style={{fontSize:12,fontWeight:700,color:'#856404'}}>⭐ Reseteo masivo de puntos</p>
-                  <p style={{fontSize:11,color:'#856404'}}>Pone en 0 los puntos de <strong>todos</strong> los clientes ({clientes.filter(c=>(c.puntos||0)>0).length} con puntos activos)</p>
+                  <p style={{fontSize:11,color:'#856404'}}>Pone en 0 los puntos de <strong>todos</strong> los clientes ({safeList(clientes).filter(c=>(c.puntos||0)>0).length} con puntos activos)</p>
                 </div>
                 <button onClick={()=>askConf('¿Resetear los puntos de TODOS los clientes a 0? Esta acción no se puede deshacer.',()=>{setClientes(cs=>cs.map(c=>({...c,puntos:0})));setConf(null);showToast('Puntos de todos los clientes reseteados ✓',C.amber);})}
                   style={{...S.btnSm,background:'#ffc107',color:'#000',fontWeight:700,fontSize:11,border:'none',flexShrink:0}}>
@@ -4064,11 +4905,17 @@ Monto a pagar:`,cp.saldo.toFixed(2));
       {pVariantes.length===0&&<Fld label="Stock inicial" type="number" value={pForm.stock} onChange={e=>setPForm({...pForm,stock:e.target.value})} min="0"/>}
       <div><label style={pErr.precio?S.labelErr:S.label}>{pErr.precio?'⚠ Precio (L) *':'Precio de Venta (L)'}</label><input type="number" value={pForm.precio} onChange={e=>{setPForm({...pForm,precio:e.target.value});setPErr(x=>({...x,precio:false}));}} style={pErr.precio?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
       <div><label style={pErr.costo?S.labelErr:S.label}>{pErr.costo?'⚠ Costo (L) *':'Costo / Compra (L)'}</label><input type="number" value={pForm.costo} onChange={e=>{setPForm({...pForm,costo:e.target.value});setPErr(x=>({...x,costo:false}));}} style={pErr.costo?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
-      <Fld label="Código de Barras" value={pForm.codigoBarras} onChange={e=>setPForm({...pForm,codigoBarras:e.target.value})} placeholder="Escanea o escribe" style={{...S.input,fontFamily:'monospace'}}/>
+      <div style={{gridColumn:isMobile?'1/-1':'auto'}}>
+        <label style={S.label}>Código de Barras</label>
+        <div style={{display:'flex',gap:8}}>
+          <input value={pForm.codigoBarras} onChange={e=>setPForm({...pForm,codigoBarras:e.target.value})} placeholder="Escanea o escribe" style={{...S.input,marginBottom:0,flex:1,fontFamily:'monospace'}}/>
+          <button type="button" onClick={()=>startCameraScan('product')} style={{...S.btnOutline,padding:'0 12px',whiteSpace:'nowrap'}}>📷 Escanear</button>
+        </div>
+      </div>
       <Fld label="Stock Mínimo (alerta)" type="number" value={pForm.stockMinimo} onChange={e=>setPForm({...pForm,stockMinimo:e.target.value})} min="0"/>
       <div style={{gridColumn:'1/-1'}}>
         <Sel label="Proveedor" value={pForm.proveedorId} onChange={e=>setPForm({...pForm,proveedorId:e.target.value})}>
-          <option value="">Sin proveedor</option>{proveedores.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+          <option value="">Sin proveedor</option>{proveedoresSafe.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
         </Sel>
       </div>
     </div>
@@ -4159,10 +5006,10 @@ Monto a pagar:`,cp.saldo.toFixed(2));
   <Modal title="🔄 Movimiento de Inventario" onClose={closeModal}>
     <div style={{display:'flex',gap:7,marginBottom:12}}>{['ingreso','salida'].map(t=><button key={t} onClick={()=>setMovForm({...movForm,tipo:t})} style={{flex:1,padding:'9px',borderRadius:9,border:`2px solid ${movForm.tipo===t?(t==='ingreso'?C.green:C.red):C.border}`,background:movForm.tipo===t?(t==='ingreso'?C.greenLight:C.redLight):'transparent',color:movForm.tipo===t?(t==='ingreso'?C.green:C.red):C.textMid,fontWeight:700,cursor:'pointer',fontSize:12}}>{t==='ingreso'?'↑ Ingreso':'↓ Salida'}</button>)}</div>
     <Fld label="Fecha" type="date" value={movForm.fecha} onChange={e=>setMovForm({...movForm,fecha:e.target.value})}/>
-    <Sel label="Producto" value={movForm.productoId} onChange={e=>setMovForm({...movForm,productoId:e.target.value})}><option value="">Selecciona...</option>{products.map(p=><option key={p.id} value={p.id}>{p.nombre} — Stock: {p.stock}</option>)}</Sel>
+    <Sel label="Producto" value={movForm.productoId} onChange={e=>setMovForm({...movForm,productoId:e.target.value})}><option value="">Selecciona...</option>{safeList(products).map(p=><option key={p.id} value={p.id}>{p.nombre} — Stock: {p.stock}</option>)}</Sel>
     <Fld label="Cantidad" type="number" value={movForm.cantidad} onChange={e=>setMovForm({...movForm,cantidad:e.target.value})} min="1"/>
     <Fld label="Nota / Motivo" value={movForm.nota} onChange={e=>setMovForm({...movForm,nota:e.target.value})} placeholder="Ej: Compra a proveedor..."/>
-    {movForm.productoId&&movForm.cantidad&&+movForm.cantidad>0&&(()=>{const p=products.find(x=>x.id===+movForm.productoId);const n=p?(movForm.tipo==='ingreso'?p.stock+(+movForm.cantidad):p.stock-(+movForm.cantidad)):0;return p?<div style={{background:movForm.tipo==='ingreso'?C.greenLight:C.redLight,border:`1px solid ${movForm.tipo==='ingreso'?C.greenBorder:C.redBorder}`,borderRadius:9,padding:'8px 12px',marginBottom:8,fontSize:12}}><div style={{display:'flex',justifyContent:'space-between',color:C.textMid,marginBottom:2}}><span>Actual:</span><strong>{p.stock}</strong></div><div style={{display:'flex',justifyContent:'space-between',color:C.textMid}}><span>Después:</span><strong style={{color:movForm.tipo==='ingreso'?C.green:n<0?C.red:C.amber}}>{n}</strong></div></div>:null;})()}
+    {movForm.productoId&&movForm.cantidad&&+movForm.cantidad>0&&(()=>{const p=safeList(products).find(x=>x.id===+movForm.productoId);const n=p?(movForm.tipo==='ingreso'?p.stock+(+movForm.cantidad):p.stock-(+movForm.cantidad)):0;return p?<div style={{background:movForm.tipo==='ingreso'?C.greenLight:C.redLight,border:`1px solid ${movForm.tipo==='ingreso'?C.greenBorder:C.redBorder}`,borderRadius:9,padding:'8px 12px',marginBottom:8,fontSize:12}}><div style={{display:'flex',justifyContent:'space-between',color:C.textMid,marginBottom:2}}><span>Actual:</span><strong>{p.stock}</strong></div><div style={{display:'flex',justifyContent:'space-between',color:C.textMid}}><span>Después:</span><strong style={{color:movForm.tipo==='ingreso'?C.green:n<0?C.red:C.amber}}>{n}</strong></div></div>:null;})()}
     <button style={{...S.btnFull,background:movForm.tipo==='ingreso'?C.green:C.red}} onClick={saveMov}>{movForm.tipo==='ingreso'?'Registrar Ingreso':'Registrar Salida'}</button>
   </Modal>
 )}
@@ -4173,7 +5020,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     <Fld label="Descripción *" value={gastoF.descripcion} onChange={e=>setGastoF({...gastoF,descripcion:e.target.value})} placeholder="Ej: Compra a proveedor"/>
     <Fld label="Monto (L) *" type="number" value={gastoF.monto} onChange={e=>setGastoF({...gastoF,monto:e.target.value})} min="0"/>
     <Sel label="Categoría" value={gastoF.categoriaId} onChange={e=>setGastoF({...gastoF,categoriaId:e.target.value})}><option value="">Sin categoría</option>{catGastos.map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}</Sel>
-    <Sel label="Proveedor (opcional)" value={gastoF.proveedorId} onChange={e=>setGastoF({...gastoF,proveedorId:e.target.value})}><option value="">Sin proveedor</option>{proveedores.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}</Sel>
+    <Sel label="Proveedor (opcional)" value={gastoF.proveedorId} onChange={e=>setGastoF({...gastoF,proveedorId:e.target.value})}><option value="">Sin proveedor</option>{proveedoresSafe.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}</Sel>
     <Fld label="Fecha" type="date" value={gastoF.fecha} onChange={e=>setGastoF({...gastoF,fecha:e.target.value})}/>
     <Fld label="Nota" value={gastoF.nota} onChange={e=>setGastoF({...gastoF,nota:e.target.value})} placeholder="Detalles..."/>
     <button style={S.btnFull} onClick={saveGasto}>Registrar Gasto</button>
@@ -4210,8 +5057,8 @@ Monto a pagar:`,cp.saldo.toFixed(2));
       <div style={{display:'flex',justifyContent:'space-between',fontSize:12,color:C.textMid,marginBottom:1}}><span>Total:</span><span style={{fontWeight:700}}>{fmt(editing.total)}</span></div>
       <div style={{display:'flex',justifyContent:'space-between',fontSize:12}}><span style={{color:C.textMid}}>Saldo:</span><span style={{fontWeight:800,color:editing.saldo>0?C.amber:C.green}}>{fmt(editing.saldo)}</span></div>
     </div>
-    {abonos.filter(a=>a.ventaId===editing.id).length===0?<p style={{textAlign:'center',color:C.textLight,padding:'14px',fontSize:12}}>Sin abonos</p>
-      :<table style={S.table}><thead><tr>{['Fecha','Monto','Nota'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead><tbody>{abonos.filter(a=>a.ventaId===editing.id).map(a=><tr key={a.id}><td style={{...S.td,fontSize:11,color:C.textMid}}>{a.fecha}</td><td style={{...S.td,fontWeight:700,color:C.green}}>{fmt(a.monto)}</td><td style={{...S.td,fontSize:11,color:C.textMid}}>{a.nota||'—'}</td></tr>)}</tbody></table>}
+    {safeList(abonos).filter(a=>a.ventaId===editing.id).length===0?<p style={{textAlign:'center',color:C.textLight,padding:'14px',fontSize:12}}>Sin abonos</p>
+      :<table style={S.table}><thead><tr>{['Fecha','Monto','Nota'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead><tbody>{safeList(abonos).filter(a=>a.ventaId===editing.id).map(a=><tr key={a.id}><td style={{...S.td,fontSize:11,color:C.textMid}}>{a.fecha}</td><td style={{...S.td,fontWeight:700,color:C.green}}>{fmt(a.monto)}</td><td style={{...S.td,fontSize:11,color:C.textMid}}>{a.nota||'—'}</td></tr>)}</tbody></table>}
     <button style={{...S.btnFull,marginTop:6}} onClick={closeModal}>Cerrar</button>
   </Modal>
 )}
@@ -4260,8 +5107,8 @@ Monto a pagar:`,cp.saldo.toFixed(2));
 {modal==='arqueo'&&(
   <Modal title="🔒 Arqueo de Caja" onClose={closeModal} wide>
     {(()=>{
-      const vH=ventas.filter(v=>v.fecha===today()&&v.tipo==='contado');
-      const aH=abonos.filter(a=>a.fecha===today());
+      const vH=safeList(ventas).filter(v=>v.fecha===today()&&v.tipo==='contado');
+      const aH=safeList(abonos).filter(a=>a.fecha===today());
       const sumaMet=met=>vH.reduce((a,v)=>{
         if(v.pagos?.length)return a+v.pagos.filter(p=>p.metodo===met).reduce((s,p)=>s+p.monto,0);
         if(v.formaPago===met)return a+v.total;return a;
@@ -4369,8 +5216,8 @@ Monto a pagar:`,cp.saldo.toFixed(2));
 
     {/* Resultado global */}
     {(arqueoF.efectivoContado!==''||arqueoF.transferenciaContado!==''||arqueoF.tarjetaContado!=='')&&(()=>{
-      const vH=ventas.filter(v=>v.fecha===today()&&v.tipo==='contado');
-      const aH=abonos.filter(a=>a.fecha===today());
+      const vH=safeList(ventas).filter(v=>v.fecha===today()&&v.tipo==='contado');
+      const aH=safeList(abonos).filter(a=>a.fecha===today());
       const sumaMet=met=>vH.reduce((a,v)=>{
         if(v.pagos?.length)return a+v.pagos.filter(p=>p.metodo===met).reduce((s,p)=>s+p.monto,0);
         if(v.formaPago===met)return a+v.total;return a;
@@ -4522,7 +5369,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     {editing.ventas?.length>0&&<>
       <h4 style={{fontSize:11,fontWeight:700,marginBottom:6,color:C.textMid,textTransform:'uppercase',letterSpacing:'0.05em'}}>Ventas del día</h4>
       <table style={{...S.table,marginBottom:13}}><thead><tr>{['Folio','Cliente','Tipo','Pago','Total'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
-      <tbody>{editing.ventas.map((v,i)=><tr key={i}><td style={{...S.td,fontSize:10,color:C.textMid}}>{v.folio}</td><td style={{...S.td,fontWeight:600,fontSize:11}}>{v.clienteNombre}</td><td style={S.td}><Badge text={v.tipo==='credito'?'Crédito':'Contado'} color={v.tipo==='credito'?C.amber:C.green} bg={v.tipo==='credito'?C.amberLight:C.greenLight}/></td><td style={{...S.td,fontSize:11}}>{v.formaPago}</td><td style={{...S.td,fontWeight:700,color:C.pink}}>{fmt(v.total)}</td></tr>)}</tbody>
+      <tbody>{editing.safeList(ventas).map((v,i)=><tr key={i}><td style={{...S.td,fontSize:10,color:C.textMid}}>{v.folio}</td><td style={{...S.td,fontWeight:600,fontSize:11}}>{v.clienteNombre}</td><td style={S.td}><Badge text={v.tipo==='credito'?'Crédito':'Contado'} color={v.tipo==='credito'?C.amber:C.green} bg={v.tipo==='credito'?C.amberLight:C.greenLight}/></td><td style={{...S.td,fontSize:11}}>{v.formaPago}</td><td style={{...S.td,fontWeight:700,color:C.pink}}>{fmt(v.total)}</td></tr>)}</tbody>
       </table>
     </>}
     {editing.porProducto?.length>0&&<>
@@ -4573,7 +5420,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
   <Modal title={`🏷️ Precios Especiales — ${cli.nombre}`} onClose={()=>{closeModal();setEdit(null);}} wide>
     <p style={{fontSize:11,color:C.textMid,marginBottom:12}}>Asigna un precio especial (VIP) por producto. Déjalo en 0 o vacío para usar el precio normal. Se aplicará automáticamente en Caja al seleccionar este cliente.</p>
     <div style={S.card}><table style={S.table}><thead><tr>{['Producto','Precio Normal','Precio VIP','Ahorro','Acc.'].map(h=><th key={h} style={S.th}>{h}</th>)}</tr></thead>
-    <tbody>{products.map(p=>{
+    <tbody>{safeList(products).map(p=>{
       const esp=peMap[p.id]||'';
       const ahorro=esp&&+esp>0&&+esp<p.precio?p.precio-+esp:0;
       return<tr key={p.id}>
@@ -4585,7 +5432,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
             placeholder={fmt(p.precio)} style={{...S.input,width:100,padding:'5px 8px',fontSize:12,marginBottom:0,border:`2px solid ${esp&&+esp>0&&+esp!==p.precio?C.purple:C.border}`}}/>
         </td>
         <td style={S.td}>{ahorro>0?<Badge text={`-${fmt(ahorro)}`} color={C.green} bg={C.greenLight} border={C.greenBorder}/>:<span style={{fontSize:10,color:C.textLight}}>—</span>}</td>
-        <td style={S.td}>{esp&&+esp>0&&+esp!==p.precio?<IBtn icon="✕" color={C.red} bg={C.redLight} sz={22} title="Quitar precio especial" onClick={()=>{savePrecioEsp(cli.id,p.id,0);setEdit(c=>{const u=clientes.find(x=>x.id===cli.id);return u?{...u}:c;});showToast('Precio especial eliminado');}}/>:<span/>}</td>
+        <td style={S.td}>{esp&&+esp>0&&+esp!==p.precio?<IBtn icon="✕" color={C.red} bg={C.redLight} sz={22} title="Quitar precio especial" onClick={()=>{savePrecioEsp(cli.id,p.id,0);setEdit(c=>{const u=safeList(clientes).find(x=>x.id===cli.id);return u?{...u}:c;});showToast('Precio especial eliminado');}}/>:<span/>}</td>
       </tr>;
     })}</tbody></table></div>
     <div style={{marginTop:10,padding:'8px 12px',background:C.purpleLight,borderRadius:8,fontSize:11,color:C.purple,fontWeight:600}}>
@@ -4731,11 +5578,11 @@ Monto a pagar:`,cp.saldo.toFixed(2));
           <div><label style={S.label}>Proveedor *</label>
             <select value={ocForm.proveedorId} onChange={e=>{
               setOcForm(f=>({...f,proveedorId:e.target.value,items:[]}));
-              const prov=proveedores.find(p=>p.id===+e.target.value);
-              if(prov){const pi=products.filter(x=>x.proveedorId===prov.id);setOcItemForm({...ocItemForm,nombre:pi[0]?.nombre||''});}
+              const prov=proveedoresSafe.find(p=>p.id===+e.target.value);
+              if(prov){const pi=safeList(products).filter(x=>x.proveedorId===prov.id);setOcItemForm({...ocItemForm,nombre:pi[0]?.nombre||''});}
             }} style={{...S.input,cursor:'pointer'}}>
               <option value="">Seleccionar proveedor...</option>
-              {proveedores.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
+              {proveedoresSafe.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
             </select>
           </div>
           <div><label style={S.label}>Fecha</label><input type="date" value={ocForm.fecha} onChange={e=>setOcForm(f=>({...f,fecha:e.target.value}))} style={S.input}/></div>
@@ -4743,7 +5590,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
 
         {/* Sugerencia rápida de productos del proveedor */}
         {ocForm.proveedorId&&(()=>{
-          const sugeridos=products.filter(p=>p.proveedorId===+ocForm.proveedorId&&(p.stockMinimo||0)>0&&stockTotal(p)<=p.stockMinimo);
+          const sugeridos=safeList(products).filter(p=>p.proveedorId===+ocForm.proveedorId&&(p.stockMinimo||0)>0&&stockTotal(p)<=p.stockMinimo);
           if(!sugeridos.length)return null;
           return<div style={{background:C.amberLight,border:`1px solid ${C.amberBorder}`,borderRadius:9,padding:'8px 12px',marginBottom:10}}>
             <p style={{fontSize:11,fontWeight:700,color:C.amber,marginBottom:5}}>⚠️ Productos con stock bajo de este proveedor:</p>
@@ -4790,7 +5637,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
         <button onClick={()=>{
           if(!ocForm.proveedorId)return showToast('Selecciona un proveedor',C.red);
           if(!ocForm.items.length)return showToast('Agrega al menos un producto',C.red);
-          const prov=proveedores.find(p=>p.id===+ocForm.proveedorId);
+          const prov=proveedoresSafe.find(p=>p.id===+ocForm.proveedorId);
           const total=ocForm.items.reduce((a,i)=>a+i.cantidad*(i.precioUnitario||0),0);
           if(ocEditId){
             setOrdenes(os=>os.map(o=>o.id===ocEditId?{...o,proveedorId:+ocForm.proveedorId,proveedorNombre:prov?.nombre||'',fecha:ocForm.fecha,items:[...ocForm.items],nota:ocForm.nota,total}:o));
@@ -4864,7 +5711,7 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     </div>}
 
     <div style={{display:'flex',flexDirection:'column',gap:10}}>
-      {apartados.map(apt=>{
+      {safeList(apartados).map(apt=>{
         const pctPagado=apt.precioTotal>0?Math.round((apt.anticipo/apt.precioTotal)*100):0;
         return<div key={apt.id} style={{background:C.card,border:`1px solid ${apt.estado==='pendiente'?C.amberBorder:apt.estado==='entregado'?C.greenBorder:C.redBorder}`,borderRadius:13,padding:'14px 16px',boxShadow:C.shadow}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
@@ -5022,7 +5869,7 @@ ${difs.map(i=>`<tr><td>${i.nombre}</td><td>${i.categoria}</td><td>${i.stockSiste
     </div>
 
     {['pendientes','completados'].map(seccion=>{
-      const lista=recordatorios.filter(r=>seccion==='pendientes'?!r.completado:r.completado).sort((a,b)=>a.fecha.localeCompare(b.fecha));
+      const lista=safeList(recordatorios).filter(r=>seccion==='pendientes'?!r.completado:r.completado).sort((a,b)=>a.fecha.localeCompare(b.fecha));
       if(!lista.length)return null;
       return<div key={seccion} style={{marginBottom:18}}>
         <h3 style={{fontSize:12,fontWeight:700,color:seccion==='pendientes'?C.amber:C.textLight,marginBottom:8,textTransform:'uppercase',letterSpacing:'0.05em'}}>
@@ -5047,12 +5894,12 @@ ${difs.map(i=>`<tr><td>${i.nombre}</td><td>${i.categoria}</td><td>${i.stockSiste
                 </div>
                 <div style={{display:'flex',gap:4,marginLeft:10,flexShrink:0}}>
                   {!r.completado&&r.clienteNombre&&(()=>{
-                    const cli=clientes.find(c=>c.nombre===r.clienteNombre);
+                    const cli=safeList(clientes).find(c=>c.nombre===r.clienteNombre);
                     if(cli?.telefono)return<IBtn icon="💬" title="WhatsApp" color={C.green} bg={C.greenLight} onClick={()=>window.open(`https://wa.me/${cli.telefono.replace(/\D/g,'')}`)}/>;
                     return null;
                   })()}
-                  {!r.completado&&<button onClick={()=>setRecord(rs=>rs.map(x=>x.id===r.id?{...x,completado:true}:x))} style={{...S.btnGreen,fontSize:11,padding:'5px 11px'}}>✓ Listo</button>}
-                  <IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>setRecord(rs=>rs.filter(x=>x.id!==r.id))}/>
+                  {!r.completado&&<button onClick={()=>markRecordDone(r.id)} style={{...S.btnGreen,fontSize:11,padding:'5px 11px'}}>✓ Listo</button>}
+                  <IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>delRecordatorio(r.id)}/>
                 </div>
               </div>
             </div>;
@@ -5071,7 +5918,7 @@ ${difs.map(i=>`<tr><td>${i.nombre}</td><td>${i.categoria}</td><td>${i.stockSiste
 {/* ═══════════════════ CAMPAÑAS WHATSAPP ═══════════════════ */}
 {/* ═══════ MODAL: NUEVO APARTADO ═══════ */}
 {modal==='addApartado'&&(()=>{
-  const prodSel=aptItemRow.productoId?products.find(p=>p.id===+aptItemRow.productoId):null;
+  const prodSel=aptItemRow.productoId?safeList(products).find(p=>p.id===+aptItemRow.productoId):null;
   const aptTotal=aptItems.reduce((a,it)=>a+it.subtotal,0);
   return<Modal title="🔒 Nuevo Apartado" onClose={()=>{closeModal();setAptItems([]);setAptItemRow({productoId:'',varianteId:'',cantidad:'1'});}} wide>
     {/* Cliente y fechas */}
@@ -5080,7 +5927,7 @@ ${difs.map(i=>`<tr><td>${i.nombre}</td><td>${i.categoria}</td><td>${i.stockSiste
         <label style={S.label}>Cliente *</label>
         <select value={aptForm.clienteId} onChange={e=>setAptForm(f=>({...f,clienteId:e.target.value}))} style={{...S.input,cursor:'pointer'}}>
           <option value="">Seleccionar cliente...</option>
-          {clientes.map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
+          {safeList(clientes).map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
         </select>
       </div>
       <div>
@@ -5100,7 +5947,7 @@ ${difs.map(i=>`<tr><td>${i.nombre}</td><td>${i.categoria}</td><td>${i.stockSiste
           <label style={S.label}>Producto</label>
           <select value={aptItemRow.productoId} onChange={e=>setAptItemRow(r=>({...r,productoId:e.target.value,varianteId:''}))} style={{...S.input,cursor:'pointer'}}>
             <option value="">Seleccionar producto...</option>
-            {products.map(p=><option key={p.id} value={p.id}>{p.nombre} — {fmt(p.precio)} (Stock: {stockTotal(p)})</option>)}
+            {safeList(products).map(p=><option key={p.id} value={p.id}>{p.nombre} — {fmt(p.precio)} (Stock: {stockTotal(p)})</option>)}
           </select>
         </div>
         <div>
@@ -5179,7 +6026,7 @@ ${difs.map(i=>`<tr><td>${i.nombre}</td><td>${i.categoria}</td><td>${i.stockSiste
       <label style={S.label}>Cliente (opcional)</label>
       <select value={recForm.clienteId} onChange={e=>setRecForm(f=>({...f,clienteId:e.target.value}))} style={{...S.input,cursor:'pointer'}}>
         <option value="">Sin cliente específico</option>
-        {clientes.map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
+        {safeList(clientes).map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
       </select>
     </div>
     <div style={{marginBottom:12}}>
@@ -5192,8 +6039,8 @@ ${difs.map(i=>`<tr><td>${i.nombre}</td><td>${i.categoria}</td><td>${i.stockSiste
 
 {/* ═══════ MODAL: ETIQUETAS DE PRECIO ═══════ */}
 {modal==='etiquetas'&&(()=>{
-  const cats=[...new Set(products.map(p=>p.categoria))].filter(Boolean);
-  const prodsFilt=products.filter(p=>!catFilter||p.categoria===catFilter);
+  const cats=[...new Set(safeList(products).map(p=>p.categoria))].filter(Boolean);
+  const prodsFilt=safeList(products).filter(p=>!catFilter||p.categoria===catFilter);
   const toggleAll=()=>selEtiq.length===prodsFilt.length?setSelEtiq([]):setSelEtiq(prodsFilt.map(p=>p.id));
   const totalEtiq=selEtiq.reduce((a,id)=>a+Math.max(1,+(etiqCopias[id]||1)),0);
   const setTodasCopias=n=>setEtiqCopias(c=>{const upd={...c};selEtiq.forEach(id=>{upd[id]=Math.max(1,n);});return upd;});
@@ -5270,10 +6117,10 @@ ${difs.map(i=>`<tr><td>${i.nombre}</td><td>${i.categoria}</td><td>${i.stockSiste
 
 {/* ═══════ HISTORIAL COMPLETO DEL CLIENTE ═══════ */}
 {historialClienteId&&(()=>{
-  const c=clientes.find(x=>x.id===historialClienteId);
+  const c=safeList(clientes).find(x=>x.id===historialClienteId);
   if(!c)return null;
-  const hist=ventas.filter(v=>v.clienteId===c.id).sort((a,b)=>b.fecha.localeCompare(a.fecha));
-  const abonosC=abonos.filter(a=>hist.some(v=>v.id===a.ventaId)).sort((a,b)=>b.fecha.localeCompare(a.fecha));
+  const hist=safeList(ventas).filter(v=>v.clienteId===c.id).sort((a,b)=>b.fecha.localeCompare(a.fecha));
+  const abonosC=safeList(abonos).filter(a=>hist.some(v=>v.id===a.ventaId)).sort((a,b)=>b.fecha.localeCompare(a.fecha));
   const tG=hist.reduce((a,v)=>a+v.total,0);
   const sP=hist.filter(v=>v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);
   const lvl=getLoyalty(tG);
@@ -5414,8 +6261,8 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
 
 {/* ════════════ APARTADOS / RESERVAS ════════════ */}
 {tab==='Apartados'&&(()=>{
-  const filtrados=apartados.filter(a=>aptFiltro==='todos'||a.estado===aptFiltro);
-  const prodApt=products.find(p=>p.id===+aptForm.productoId);
+  const filtrados=safeList(apartados).filter(a=>aptFiltro==='todos'||a.estado===aptFiltro);
+  const prodApt=safeList(products).find(p=>p.id===+aptForm.productoId);
   const totalApt=prodApt?(prodApt.precio*(+aptForm.cantidad||1)):0;
   const saldoApt=totalApt-(+aptForm.anticipo||0);
   return<div>
@@ -5423,7 +6270,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
       <div style={{display:'flex',gap:6}}>
         {['pendiente','entregado','cancelado','todos'].map(f=>(
           <button key={f} onClick={()=>setAptFiltro(f)} style={{...S.btnSm,background:aptFiltro===f?C.purple:C.purpleLight,color:aptFiltro===f?'#fff':C.purple,fontSize:10}}>
-            {f.charAt(0).toUpperCase()+f.slice(1)} {f==='todos'?apartados.length:apartados.filter(a=>a.estado===f).length}
+            {f.charAt(0).toUpperCase()+f.slice(1)} {f==='todos'?apartados.length:safeList(apartados).filter(a=>a.estado===f).length}
           </button>
         ))}
       </div>
@@ -5435,10 +6282,10 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
         <h3 style={{fontSize:13,fontWeight:800,marginBottom:12,color:C.purple}}>🔒 Nuevo Apartado / Reserva</h3>
         <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10}}>
           <Sel label="Cliente *" value={aptForm.clienteId} onChange={e=>setAptForm(f=>({...f,clienteId:e.target.value}))}>
-            <option value="">Seleccionar cliente...</option>{clientes.map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
+            <option value="">Seleccionar cliente...</option>{safeList(clientes).map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
           </Sel>
           <Sel label="Producto *" value={aptForm.productoId} onChange={e=>setAptForm(f=>({...f,productoId:e.target.value,varianteId:''}))}>
-            <option value="">Seleccionar producto...</option>{products.map(p=><option key={p.id} value={p.id}>{p.nombre} — {fmt(p.precio)}</option>)}
+            <option value="">Seleccionar producto...</option>{safeList(products).map(p=><option key={p.id} value={p.id}>{p.nombre} — {fmt(p.precio)}</option>)}
           </Sel>
           {prodApt&&(prodApt.variantes||[]).length>0&&(
             <Sel label="Variante" value={aptForm.varianteId} onChange={e=>setAptForm(f=>({...f,varianteId:e.target.value}))}>
@@ -5583,7 +6430,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
 {/* ════════════ RECORDATORIOS ════════════ */}
 {tab==='Recordatorios'&&(()=>{
   const TIPOS_REC=['llamada','visita','email','WhatsApp','otro'];
-  const filtradosRec=recordatorios.filter(r=>{
+  const filtradosRec=safeList(recordatorios).filter(r=>{
     if(recFiltro==='pendiente')return !r.completado;
     if(recFiltro==='hoy')return !r.completado&&r.fecha===today();
     if(recFiltro==='vencido')return !r.completado&&r.fecha<today();
@@ -5619,7 +6466,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
           </Sel>
           <div><label style={S.label}>📅 Fecha *</label><input type="date" value={recForm.fecha} onChange={e=>setRecForm(f=>({...f,fecha:e.target.value}))} style={S.input}/></div>
           <Sel label="Cliente (opcional)" value={recForm.clienteId} onChange={e=>setRecForm(f=>({...f,clienteId:e.target.value}))}>
-            <option value="">Sin cliente específico</option>{clientes.map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
+            <option value="">Sin cliente específico</option>{safeList(clientes).map(c=><option key={c.id} value={c.id}>{c.nombre}</option>)}
           </Sel>
           <div style={{gridColumn:'1/-1'}}><Fld label="Nota" value={recForm.nota} onChange={e=>setRecForm(f=>({...f,nota:e.target.value}))} placeholder="Detalles adicionales..."/></div>
         </div>
@@ -5630,7 +6477,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
     {filtradosRec.length===0&&<p style={{textAlign:'center',color:C.textLight,padding:'26px',fontSize:13}}>Sin recordatorios</p>}
     <div style={{display:'flex',flexDirection:'column',gap:8}}>
       {filtradosRec.map(r=>{
-        const cli=clientes.find(c=>c.id===r.clienteId);
+        const cli=safeList(clientes).find(c=>c.id===r.clienteId);
         const vencido=!r.completado&&r.fecha<today();
         const esHoy=r.fecha===today();
         return<div key={r.id} style={{background:r.completado?C.card:vencido?C.redLight:esHoy?C.blueLight:C.card,border:`1px solid ${r.completado?C.cardBorder:vencido?C.redBorder:esHoy?C.blueBorder:C.cardBorder}`,borderRadius:11,padding:'12px 15px',display:'flex',justifyContent:'space-between',alignItems:'center',opacity:r.completado?0.6:1}}>
@@ -5651,8 +6498,8 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
             {!r.completado&&cli?.telefono&&r.tipo==='WhatsApp'&&(
               <IBtn icon="💬" color={C.green} bg={C.greenLight} title="Abrir WhatsApp" onClick={()=>window.open(`https://wa.me/${cli.telefono.replace(/\D/g,'')}?text=${encodeURIComponent(r.titulo)}`,'_blank')}/>
             )}
-            {!r.completado&&<IBtn icon="✅" color={C.green} bg={C.greenLight} title="Marcar completado" onClick={()=>setRecord(rs=>rs.map(x=>x.id===r.id?{...x,completado:true}:x))}/>}
-            <IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>setRecord(rs=>rs.filter(x=>x.id!==r.id))}/>
+            {!r.completado&&<IBtn icon="✅" color={C.green} bg={C.greenLight} title="Marcar completado" onClick={()=>markRecordDone(r.id)}/>}
+            <IBtn icon="🗑" color={C.red} bg={C.redLight} onClick={()=>delRecordatorio(r.id)}/>
           </div>
         </div>;
       })}
@@ -5677,10 +6524,10 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
   ];
 
   const getCount=tipo=>{
-    if(tipo==='todos')return clientes.filter(c=>c.telefono).length;
-    if(tipo==='deudores')return clientes.filter(c=>{const sp=ventas.filter(v=>v.clienteId===c.id&&v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);return sp>0&&c.telefono;}).length;
-    if(tipo==='inactivos'){const hace60=new Date();hace60.setDate(hace60.getDate()-60);const cut=hace60.toISOString().split('T')[0];return clientes.filter(c=>{const lv=ventas.filter(v=>v.clienteId===c.id).sort((a,b)=>b.fecha.localeCompare(a.fecha))[0];return(!lv||lv.fecha<cut)&&c.telefono;}).length;}
-    if(tipo==='cumple')return clientes.filter(c=>isBirthdayToday(c.fechaNacimiento)&&c.telefono).length;
+    if(tipo==='todos')return safeList(clientes).filter(c=>c.telefono).length;
+    if(tipo==='deudores')return safeList(clientes).filter(c=>{const sp=safeList(ventas).filter(v=>v.clienteId===c.id&&v.tipo==='credito'&&v.estado==='pendiente').reduce((a,v)=>a+v.saldo,0);return sp>0&&c.telefono;}).length;
+    if(tipo==='inactivos'){const hace60=new Date();hace60.setDate(hace60.getDate()-60);const cut=hace60.toISOString().split('T')[0];return safeList(clientes).filter(c=>{const lv=safeList(ventas).filter(v=>v.clienteId===c.id).sort((a,b)=>b.fecha.localeCompare(a.fecha))[0];return(!lv||lv.fecha<cut)&&c.telefono;}).length;}
+    if(tipo==='cumple')return safeList(clientes).filter(c=>isBirthdayToday(c.fechaNacimiento)&&c.telefono).length;
     return 0;
   };
 
@@ -5728,7 +6575,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
     <div style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:11,padding:'12px 15px',marginBottom:14}}>
       <p style={{fontSize:11,fontWeight:700,color:C.textMid,marginBottom:6}}>📱 Vista previa (primer cliente del segmento):</p>
       {(()=>{
-        const c=clientes.find(x=>x.telefono);
+        const c=safeList(clientes).find(x=>x.telefono);
         if(!c)return<p style={{fontSize:11,color:C.textLight}}>Sin clientes con teléfono</p>;
         const msg=campMsg.replace('{nombre}',c.nombre).replace('{tienda}',config.nombre);
         return<div style={{background:'#dcf8c6',borderRadius:10,padding:'10px 13px',fontSize:12,lineHeight:1.5,maxWidth:300}}>{msg}</div>;
@@ -5745,7 +6592,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
 
 {/* ════════════ MODAL: ETIQUETAS DE PRECIO ════════════ */}
 {modal==='etiquetas'&&(()=>{
-  const filtradosEtq=products.filter(p=>!busqEtq||p.nombre.toLowerCase().includes(busqEtq.toLowerCase())||p.categoria?.toLowerCase().includes(busqEtq.toLowerCase()));
+  const filtradosEtq=safeList(products).filter(p=>!busqEtq||p.nombre.toLowerCase().includes(busqEtq.toLowerCase())||p.categoria?.toLowerCase().includes(busqEtq.toLowerCase()));
   const toggleSel=id=>setSelIds(ids=>ids.includes(id)?ids.filter(x=>x!==id):[...ids,id]);
   const selAll=()=>setSelIds(filtradosEtq.map(p=>p.id));
   const clearSel=()=>setSelIds([]);
@@ -5830,7 +6677,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
 {modal==='recibirOC'&&editingOC&&(()=>{
   const matchProd=(nombre)=>{
     const n=nombre.toLowerCase();
-    return products.find(p=>p.nombre.toLowerCase()===n||p.nombre.toLowerCase().includes(n.split(' ')[0]));
+    return safeList(products).find(p=>p.nombre.toLowerCase()===n||p.nombre.toLowerCase().includes(n.split(' ')[0]));
   };
   const recibirOC=()=>{
     /* update stock for each item */
@@ -5839,7 +6686,7 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
       const qty=+cantidades[it._key||it.nombre]||it.cantidad;
       const prod=matchProd(it.nombre);
       if(prod){
-        setProducts(ps=>ps.map(p=>{
+        setProducts(ps=>safeList(ps).map(p=>{
           if(p.id!==prod.id)return p;
           return{...p,stock:(p.stock||0)+qty};
         }));
@@ -5976,6 +6823,33 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
   );
 })()}
 
+      {cameraScanOpen&&(
+        <div onClick={()=>{ void stopCameraScan(); }} style={{position:'fixed',inset:0,background:'rgba(0,0,0,.55)',zIndex:300,display:'flex',alignItems:isMobile?'flex-end':'center',justifyContent:'center',padding:isMobile?0:16}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:'100%',maxWidth:isMobile?'100%':460,background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:isMobile?'18px 18px 0 0':16,boxShadow:C.shadowMd,padding:14,paddingBottom:`calc(14px + env(safe-area-inset-bottom, 0px))`,maxHeight:isMobile?'86vh':'auto',overflowY:'auto'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <div style={{fontWeight:800,color:C.text}}>{cameraScanTarget==='product'?'📷 Escanear código del producto':'📷 Escanear con cámara'}</div>
+              <button onClick={()=>{ void stopCameraScan(); }} style={{background:'none',border:'none',fontSize:18,cursor:'pointer',color:C.textMid}}>✕</button>
+            </div>
+            <div style={{borderRadius:12,overflow:'hidden',background:'#111',minHeight:220,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:10}}>
+              {cameraUsingHtml5?<div id={cameraRegionId} style={{width:'100%',minHeight:260}}/>:(cameraSupported?<video ref={cameraVideoRef} playsInline muted style={{width:'100%',maxHeight:320,objectFit:'cover'}}/>:<div style={{padding:20,color:'#fff',fontSize:12}}>La cámara no está disponible en este dispositivo.</div>)}
+            </div>
+            <div style={{fontSize:11,color:cameraScanMsg?.startsWith('No se encontró')?C.red:C.textMid,marginBottom:8,minHeight:16}}>{cameraScanMsg||(cameraScanTarget==='product'?'Apunta al código para llenar el campo automáticamente.':'Alinea el código de barras frente a la cámara.')}</div>
+            <div style={{display:'flex',gap:8}}>
+              <input value={cameraManual} onChange={e=>setCameraManual(e.target.value)} placeholder="Ingresar código manualmente" style={{...S.input,marginBottom:0,flex:1,fontFamily:'monospace'}}/>
+              <button onClick={()=>applyScannedCode(cameraManual)} style={{...S.btn,padding:'0 14px'}}>Aplicar</button>
+            </div>
+          </div>
+        </div>
+      )}
+      {isMobile&&(
+        <div style={{position:'fixed',left:0,right:0,bottom:0,zIndex:120,display:'flex',justifyContent:'center',pointerEvents:'none'}}>
+          <div style={{pointerEvents:'auto',display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,background:C.card,border:`1px solid ${C.cardBorder}`,boxShadow:C.shadowMd,borderRadius:18,padding:'8px 10px',margin:`0 10px calc(10px + env(safe-area-inset-bottom, 0px))`,width:'min(100%,480px)'}}>
+            {[['Caja','🖥️'],['Inventario','📦'],['Ventas','🛍️'],['Clientes','👥']].map(([id,icon])=>(
+              <button key={id} onClick={()=>{setTab(id);setSearch('');}} style={{border:'none',borderRadius:12,padding:'8px 6px',background:tab===id?C.pinkLight:'transparent',color:tab===id?C.pink:C.textMid,fontWeight:700,fontSize:11,cursor:'pointer'}}>{icon}<div style={{fontSize:10,marginTop:2}}>{id}</div></button>
+            ))}
+          </div>
+        </div>
+      )}
       <style>{`*{box-sizing:border-box;}input:focus,select:focus{border-color:#e8417a!important;box-shadow:0 0 0 3px rgba(232,65,122,0.1);}input[type=number]::-webkit-inner-spin-button{opacity:0.4;}::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-thumb{background:${isDark?'#3d3555':'#e0d8ea'};border-radius:2px;}input,select,textarea{color-scheme:${isDark?'dark':'light'};}`}</style>
     </div>
     </ThemeCtx.Provider>
