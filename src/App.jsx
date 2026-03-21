@@ -554,6 +554,13 @@ export default function App(){
   const [editing,setEdit]  = useState(null);
   const [toast,  setToast] = useState(null);
   const [confAct,setConf]  = useState(null);
+  const [viewportW,setViewportW]=useState(()=>typeof window!=='undefined'?(window.innerWidth||390):390);
+  const isMobile=viewportW<900;
+  useEffect(()=>{
+    const onResize=()=>setViewportW(typeof window!=='undefined'?(window.innerWidth||390):390);
+    window.addEventListener('resize',onResize);
+    return()=>window.removeEventListener('resize',onResize);
+  },[]);
 
   /* ── forms ── */
   const [pForm, setPForm] = useState({nombre:'',categoria:'',stock:'',precio:'',costo:'',codigoBarras:'',foto:'',stockMinimo:'5',proveedorId:''});
@@ -1158,6 +1165,10 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   },[ventas,gastos]);
   useEffect(()=>{if(alertasStock.length>0)setAlertaDismissed(false);},[alertasStock.length]);
   const TABS=useMemo(()=>ALL_TABS.filter(t=>session&&TAB_ROLES[t.id]?.includes(session.rol)),[session]);
+  const mobileBottomTabs=useMemo(()=>{
+    const preferred=['Caja','Inventario','Movimientos','Ventas','Clientes'];
+    return preferred.map(id=>TABS.find(t=>t.id===id)).filter(Boolean).slice(0,5);
+  },[TABS]);
 
 
   /* ── LOGIN ── */
@@ -2555,7 +2566,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       )}
 
       {/* ── SIDEBAR ── */}
-      <aside style={S.sidebar}>
+      {!isMobile&&(<aside style={S.sidebar}>
         <div style={{padding:'14px 12px 10px',borderBottom:`1px solid ${C.border}`}}>
           <div style={{display:'flex',alignItems:'center',gap:8}}>
             <img src={logo} alt="" style={{width:38,height:38,borderRadius:8,objectFit:'contain',border:`2px solid ${C.pinkLight}`,background:'#fff'}}/>
@@ -2604,15 +2615,21 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           </>}
           <div style={{marginTop:5,fontSize:9,color:C.textLight}}>AdornArte v6.0</div>
         </div>
-      </aside>
+      </aside>)}
 
       {/* ── MAIN ── */}
-      <div style={S.main}>
-        <div style={S.topbar}>
-          <div><div style={{fontSize:17,fontWeight:800,color:C.text}}>{tabInfo.icon} {tabInfo.label}</div><div style={{fontSize:10,color:C.textLight,marginTop:1}}>{new Date().toLocaleDateString('es-HN',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div></div>
+      <div style={isMobile?{...S.main,marginLeft:0,paddingTop:'env(safe-area-inset-top, 0px)'}:S.main}>
+        <div style={isMobile?{...S.topbar,padding:'10px 12px',top:'env(safe-area-inset-top, 0px)'}:S.topbar}>
+          <div style={{display:'flex',alignItems:'center',gap:10,minWidth:0}}>
+            {isMobile&&<button onClick={()=>setTab('Caja')} style={{background:C.pinkLight,border:`1px solid ${C.border}`,borderRadius:12,width:40,height:40,flexShrink:0,cursor:'pointer',fontSize:18,color:C.pink}}>≡</button>}
+            <div style={{minWidth:0}}>
+              <div style={{fontSize:isMobile?15:17,fontWeight:800,color:C.text,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{tabInfo.icon} {tabInfo.label}</div>
+              <div style={{fontSize:isMobile?11:10,color:C.textLight,marginTop:1}}>{new Date().toLocaleDateString('es-HN',{weekday:'long',year:'numeric',month:'long',day:'numeric'})}</div>
+            </div>
+          </div>
           <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:isMobile?'wrap':'nowrap',justifyContent:'flex-end'}}>
-            {alertasStock.length>0&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:7,padding:'4px 10px',fontSize:10,color:C.red,fontWeight:700}}>⚠️ {alertasStock.length} bajo</div>}
-            <div style={{background:C.pinkLight,borderRadius:9,padding:'5px 12px',fontSize:11,color:C.pink,fontWeight:700}}>🌸 {config.nombre}</div>
+            {alertasStock.length>0&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:9,padding:isMobile?'5px 9px':'4px 10px',fontSize:isMobile?11:10,color:C.red,fontWeight:700}}>⚠️ {alertasStock.length} bajo</div>}
+            {!isMobile&&<div style={{background:C.pinkLight,borderRadius:9,padding:'5px 12px',fontSize:11,color:C.pink,fontWeight:700}}>🌸 {config.nombre}</div>}
           </div>
         </div>
 
@@ -2642,7 +2659,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         )}
         {showNotifs&&<div onClick={()=>setShowNotifs(false)} style={{position:'fixed',inset:0,zIndex:199}}/>}
 
-        <div style={S.content}>
+        <div style={isMobile?{...S.content,padding:'12px 10px 112px',maxWidth:'100vw',overflowX:'hidden'}:S.content}>
 
         {/* ── Notificaciones de cumpleaños ── */}
         {cumpleNotis.filter(c=>!cumpleDismissed.includes(c.id)).map(c=>(
@@ -2654,7 +2671,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 
 {/* ════════════════ CAJA / POS ════════════════ */}
 {tab==='Caja'&&(
-  <div style={{display:'grid',gridTemplateColumns:'1fr 380px',gap:16,height:'calc(100vh - 130px)',minHeight:500}}>
+  <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'1fr 380px',gap:isMobile?12:16,height:isMobile?'auto':'calc(100vh - 130px)',minHeight:isMobile?0:500}}>
     {/* Left: product selector */}
     <div style={{display:'flex',flexDirection:'column',gap:10,overflow:'hidden'}}>
       <div style={{display:'flex',gap:8}}>
@@ -2860,7 +2877,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 {/* ════════════════ DASHBOARD ════════════════ */}
 {tab==='Dashboard'&&(
   <div>
-    <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12,marginBottom:12}}>
+    <div style={{display:'grid',gridTemplateColumns:isMobile?'repeat(2,minmax(0,1fr))':'repeat(4,1fr)',gap:isMobile?10:12,marginBottom:12}}>
       <Stat icon="🛍️" value={stats.ventasHoy} label="Ventas Hoy" bg={C.pinkLight}/>
       <Stat icon="💰" value={fmt(stats.totalVentas)} label="Total Facturado" bg={C.blueLight}/>
       <Stat icon="✅" value={fmt(stats.totalCobrado)} label="Total Cobrado" bg={C.greenLight}/>
@@ -2933,7 +2950,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
       const BAR_H=110; /* px altura máxima barra */
       return(
       <div style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:14,padding:'16px 20px',marginTop:14,boxShadow:C.shadow}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:14}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:isMobile?'stretch':'center',flexDirection:isMobile?'column':'row',gap:isMobile?10:0,marginBottom:14}}>
           <div><h3 style={{fontSize:13,fontWeight:800}}>📊 Comparativo Mensual</h3><p style={{fontSize:11,color:C.textLight,marginTop:2}}>Últimos 6 meses</p></div>
           <div style={{display:'flex',gap:12,fontSize:11,color:C.textMid}}>
             <span><span style={{display:'inline-block',width:10,height:10,borderRadius:2,background:C.pink,marginRight:4,verticalAlign:'middle'}}></span>Ventas</span>
@@ -3050,7 +3067,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 {/* ════════════════ MOVIMIENTOS ════════════════ */}
 {tab==='Movimientos'&&(
   <div>
-    <div style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:'11px 15px',marginBottom:13,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',boxShadow:C.shadow}}>
+    <div style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:isMobile?'10px 12px':'11px 15px',marginBottom:13,display:'flex',alignItems:'center',gap:10,flexWrap:'wrap',boxShadow:C.shadow}}>
       <div style={{display:'flex',gap:5}}>{[['todos','Todos'],['dia','Por día']].map(([v,l])=><button key={v} onClick={()=>setMFiltro(v)} style={{padding:'5px 11px',borderRadius:7,border:`2px solid ${mFiltro===v?C.pink:C.border}`,background:mFiltro===v?C.pinkLight:'transparent',color:mFiltro===v?C.pink:C.textMid,fontWeight:mFiltro===v?700:500,fontSize:11,cursor:'pointer'}}>{l}</button>)}</div>
       {mFiltro==='dia'&&<><input type="date" value={mFiltroFecha||today()} onChange={e=>setMFiltroFecha(e.target.value)} style={{...S.input,width:148,padding:'6px 10px'}}/><button onClick={()=>setMFiltroFecha(today())} style={{...S.btnSm,fontSize:10}}>Hoy</button></>}
       <div style={{marginLeft:'auto'}}><button style={S.btn} onClick={openAddMov}>+ Nuevo Movimiento</button></div>
@@ -3241,7 +3258,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 )}
 {tab==='Creditos'&&(
   <div>
-    <div style={{display:'grid',gridTemplateColumns:'repeat(3,1fr)',gap:12,marginBottom:16}}>
+    <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'repeat(3,1fr)',gap:isMobile?10:12,marginBottom:16}}>
       <Stat icon="💳" value={fmt(fcred.reduce((a,v)=>a+v.saldo,0))} label="Saldo Pendiente" bg={C.amberLight}/>
       <Stat icon="⏳" value={fcred.filter(v=>v.estado==='pendiente').length} label="Activos" bg={C.redLight}/>
       <Stat icon="✅" value={fcred.filter(v=>v.estado==='pagada').length} label="Liquidados" bg={C.greenLight}/>
@@ -5976,7 +5993,39 @@ Pulsera de Cuero,Pulseras,95,40,40,8,`}
   );
 })()}
 
-      <style>{`*{box-sizing:border-box;} html,body,#root{max-width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;} body{padding-bottom:env(safe-area-inset-bottom,0px);} input:focus,select:focus{border-color:#e8417a!important;box-shadow:0 0 0 3px rgba(232,65,122,0.1);}input[type=number]::-webkit-inner-spin-button{opacity:0.4;}::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-thumb{background:${isDark?'#3d3555':'#e0d8ea'};border-radius:2px;}input,select,textarea,button{font-size:16px;} input,select,textarea{color-scheme:${isDark?'dark':'light'};} @supports(padding:max(0px)){ body{padding-bottom:max(env(safe-area-inset-bottom,0px),0px);} }`}</style>
+
+      {isMobile&&(
+        <div style={{position:'fixed',left:0,right:0,bottom:0,zIndex:120,display:'flex',justifyContent:'center',pointerEvents:'none'}}>
+          <div style={{pointerEvents:'auto',display:'grid',gridTemplateColumns:`repeat(${Math.max(1,mobileBottomTabs.length||5)},1fr)`,gap:6,background:C.card,border:`1px solid ${C.cardBorder}`,boxShadow:C.shadowMd,borderRadius:20,padding:'7px 8px',margin:`0 8px calc(8px + env(safe-area-inset-bottom, 0px))`,width:'min(100%,430px)',backdropFilter:'blur(10px)'}}>
+            {mobileBottomTabs.map(t=>(
+              <button
+                key={t.id}
+                onClick={()=>{setTab(t.id);setSearch('');}}
+                style={{
+                  border:'none',
+                  borderRadius:14,
+                  padding:'8px 4px',
+                  minHeight:58,
+                  background:tab===t.id?C.pinkLight:'transparent',
+                  color:tab===t.id?C.pink:C.textMid,
+                  fontWeight:700,
+                  fontSize:10,
+                  cursor:'pointer',
+                  display:'flex',
+                  flexDirection:'column',
+                  alignItems:'center',
+                  justifyContent:'center',
+                  gap:3
+                }}>
+                <div style={{fontSize:18,lineHeight:1}}>{t.icon}</div>
+                <div style={{fontSize:10,lineHeight:1.05,whiteSpace:'nowrap'}}>{t.id==='Movimientos'?'Movs.':t.id}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <style>{`*{box-sizing:border-box;}html,body,#root{max-width:100%;overflow-x:hidden;-webkit-text-size-adjust:100%;}body{padding-bottom:env(safe-area-inset-bottom,0px);}input:focus,select:focus{border-color:#e8417a!important;box-shadow:0 0 0 3px rgba(232,65,122,0.1);}input[type=number]::-webkit-inner-spin-button{opacity:0.4;}::-webkit-scrollbar{width:4px;}::-webkit-scrollbar-thumb{background:${isDark?'#3d3555':'#e0d8ea'};border-radius:2px;}input,select,textarea,button{font-size:16px;}input,select,textarea{color-scheme:${isDark?'dark':'light'};}`}</style>
     </div>
     </ThemeCtx.Provider>
   );
