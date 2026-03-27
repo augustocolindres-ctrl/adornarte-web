@@ -1,0 +1,8 @@
+1) Ejecuta MIGRACION_TABLAS_PRO.sql en Supabase.
+2) Mantén .env y Vercel apuntando al proyecto nuevo.
+3) Haz login en la app y luego importa tu backup JSON desde la app.
+4) Desde esta versión:
+   - ventas, clientes y abonos viven en tablas reales de Supabase
+   - backups siguen en adornarte_backups
+   - productos siguen locales/IndexedDB para no romper imágenes ni reventar egress
+   - el resto sigue en adornarte_store por compatibilidad
