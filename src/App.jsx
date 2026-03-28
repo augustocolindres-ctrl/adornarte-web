@@ -822,9 +822,9 @@ export default function App(){
   },[]);
   const [catalogSearch,setCatalogSearch]=useState('');
   const [catalogCategory,setCatalogCategory]=useState('Todas');
-  const [catalogOnlyAvailable,setCatalogOnlyAvailable]=useState(true);
-  const [catalogCart,setCatalogCart]=useState(()=>load('aa_catalog_cart',[]));
+  const [catalogCart,setCatalogCart]=useState([]);
   const [catalogCartOpen,setCatalogCartOpen]=useState(false);
+  const [catalogGallery,setCatalogGallery]=useState({open:false,product:null,index:0});
 
   /* ── forms ── */
   const [pForm, setPForm] = useState({nombre:'',categoria:'',stock:'',precio:'',costo:'',codigoBarras:'',foto:'',stockMinimo:'5',proveedorId:''});
@@ -849,8 +849,6 @@ export default function App(){
     return()=>window.removeEventListener('resize',onResize);
   },[]);
   useEffect(()=>{ if(!isMobile) setMobileMenuOpen(false); },[isMobile]);
-  useEffect(()=>{try{localStorage.setItem('aa_catalog_cart',JSON.stringify(catalogCart));}catch{}},[catalogCart]);
-  useEffect(()=>{ if(!isCatalogRoute) setCatalogCartOpen(false); },[isCatalogRoute]);
   useEffect(()=>{
     if(!isMobile){ setMobileBottomHidden(false); return; }
     let last=window.scrollY||0;
@@ -3498,51 +3496,146 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 
   const tabInfo=TABS.find(t=>t.id===tab)||TABS[0]||{icon:'',label:''};
   const catalogCategories=useMemo(()=>['Todas',...Array.from(new Set(safeList(products).map(p=>(p?.categoria||'General').trim()||'General'))).sort((a,b)=>a.localeCompare(b,'es'))],[products]);
+  const getCatalogImages=useCallback((prod)=>{
+    const out=[];
+    const push=(value)=>{
+      if(!value) return;
+      if(Array.isArray(value)){ value.forEach(push); return; }
+      if(typeof value==='string'){
+        const trimmed=value.trim();
+        if(!trimmed) return;
+        if(trimmed.startsWith('[')){
+          try{
+            const parsed=JSON.parse(trimmed);
+            if(Array.isArray(parsed)){ parsed.forEach(push); return; }
+          }catch{}
+        }
+        if(/^data:image|^https?:\/\//i.test(trimmed) || trimmed.startsWith('/')) out.push(trimmed);
+      }
+    };
+    push(prod?.foto);
+    push(prod?.fotos);
+    push(prod?.imagenes);
+    push(prod?.galeria);
+    return [...new Set(out.filter(Boolean))];
+  },[]);
   const catalogProducts=useMemo(()=>{
     const term=(catalogSearch||'').trim().toLowerCase();
     return safeList(products)
       .filter(p=>catalogCategory==='Todas'?true:((p?.categoria||'General')===catalogCategory))
-      .filter(p=>catalogOnlyAvailable?stockTotal(p)>0:true)
       .filter(p=>!term?true:[p?.nombre,p?.categoria,p?.codigoBarras].some(v=>String(v||'').toLowerCase().includes(term)))
       .sort((a,b)=>{
         const aStock=stockTotal(a);
         const bStock=stockTotal(b);
+        const aNew=Number(a?.createdAt||a?.id||0);
+        const bNew=Number(b?.createdAt||b?.id||0);
         if((bStock>0)!==(aStock>0)) return (bStock>0)-(aStock>0);
+        if(bNew!==aNew) return bNew-aNew;
         return String(a?.nombre||'').localeCompare(String(b?.nombre||''),'es');
       });
-  },[products,catalogCategory,catalogOnlyAvailable,catalogSearch]);
+  },[products,catalogCategory,catalogSearch]);
+  const catalogNovedades=useMemo(()=>catalogProducts.slice(0,Math.min(4,catalogProducts.length)),[catalogProducts]);
+  const catalogDestacados=useMemo(()=>[...catalogProducts].sort((a,b)=>(stockTotal(b)-stockTotal(a)) || ((b?.precio||0)-(a?.precio||0))).slice(0,Math.min(4,catalogProducts.length)),[catalogProducts]);
   const catalogWhatsApp=String(config?.whatsappNumero||'').replace(/\D/g,'');
   const catalogLink=typeof window!=='undefined'?`${window.location.origin}/catalogo`:'';
-  const catalogNovedades=useMemo(()=>[...safeList(products)]
-    .filter(p=>stockTotal(p)>0)
-    .sort((a,b)=>Number(b?.id||0)-Number(a?.id||0))
-    .slice(0,isMobile?4:6),[products,isMobile]);
-  const catalogDestacados=useMemo(()=>[...safeList(products)]
-    .filter(p=>stockTotal(p)>0)
-    .sort((a,b)=>Number(b?.precio||0)-Number(a?.precio||0))
-    .slice(0,isMobile?4:6),[products,isMobile]);
-  const catalogCartCount=useMemo(()=>safeList(catalogCart).reduce((a,i)=>a+(+i?.cantidad||0),0),[catalogCart]);
-  const catalogCartTotal=useMemo(()=>safeList(catalogCart).reduce((a,i)=>a+((+i?.precio||0)*(+i?.cantidad||0)),0),[catalogCart]);
-  const catalogAddToCart=(prod)=>setCatalogCart(prev=>{
-    const base=safeList(prev);
+  const catalogCartCount=useMemo(()=>catalogCart.reduce((acc,item)=>acc+(item?.cantidad||0),0),[catalogCart]);
+  const catalogCartTotal=useMemo(()=>catalogCart.reduce((acc,item)=>acc+((item?.precio||0)*(item?.cantidad||0)),0),[catalogCart]);
+  const resetCatalogView=useCallback(()=>{
+    setCatalogSearch('');
+    setCatalogCategory('Todas');
+    setCatalogCartOpen(false);
+    if(typeof window!=='undefined') window.scrollTo({top:0,behavior:'smooth'});
+  },[]);
+  const scrollCatalogTo=useCallback((id)=>{
+    const el=typeof document!=='undefined'?document.getElementById(id):null;
+    if(el) el.scrollIntoView({behavior:'smooth',block:'start'});
+  },[]);
+  const addCatalogToCart=useCallback((prod)=>{
+    if(!prod) return;
+    safeSetList(setCatalogCart,prev=>{
+      const idx=prev.findIndex(item=>String(item.id)===String(prod.id));
+      if(idx>=0){
+        return prev.map((item,i)=>i===idx?{...item,cantidad:(item.cantidad||0)+1}:item);
+      }
+      return [...prev,{id:prod.id,nombre:prod.nombre,precio:Number(prod.precio||0),foto:prod.foto||'',cantidad:1,categoria:prod.categoria||'General'}];
+    },[]);
+    setCatalogCartOpen(true);
+    setToast({msg:`${prod?.nombre||'Producto'} agregado al carrito`,color:C.green});
+  },[setToast,C.green]);
+  const changeCatalogCartQty=useCallback((id,delta)=>{
+    safeSetList(setCatalogCart,prev=>prev.flatMap(item=>{
+      if(String(item.id)!==String(id)) return [item];
+      const next=(item.cantidad||0)+delta;
+      if(next<=0) return [];
+      return [{...item,cantidad:next}];
+    }),[]);
+  },[]);
+  const removeCatalogFromCart=useCallback((id)=>{
+    safeSetList(setCatalogCart,prev=>prev.filter(item=>String(item.id)!==String(id)),[]);
+  },[]);
+  const openCatalogGallery=useCallback((prod,startIndex=0)=>{
+    setCatalogGallery({open:true,product:prod||null,index:startIndex});
+  },[]);
+  const closeCatalogGallery=useCallback(()=>setCatalogGallery({open:false,product:null,index:0}),[]);
+  const catalogGalleryImages=useMemo(()=>getCatalogImages(catalogGallery.product),[catalogGallery.product,getCatalogImages]);
+  const catalogCartMessage=useMemo(()=>catalogCart.map(item=>`• ${item.nombre} x${item.cantidad} — ${fmt((item.precio||0)*(item.cantidad||0))}`).join('%0A'),[catalogCart]);
+
+  const renderCatalogCard=(prod,isNew=false,isFeatured=false,isAll=false)=>{
     const stock=stockTotal(prod);
-    const found=base.find(i=>i.id===prod.id);
-    if(found){
-      return base.map(i=>i.id===prod.id?{...i,cantidad:Math.min(stock||i.cantidad+1,i.cantidad+1)}:i);
-    }
-    return [...base,{id:prod.id,nombre:prod.nombre,precio:+prod.precio||0,foto:prod.foto||'',categoria:prod.categoria||'General',codigoBarras:prod.codigoBarras||'',stockDisponible:stock,cantidad:1}];
-  });
-  const catalogDecQty=(id)=>setCatalogCart(prev=>safeList(prev).flatMap(i=>i.id!==id?[i]:(i.cantidad>1?[{...i,cantidad:i.cantidad-1}]:[])));
-  const catalogIncQty=(id)=>setCatalogCart(prev=>safeList(prev).map(i=>i.id!==id?i:{...i,cantidad:Math.min(i.stockDisponible||999,i.cantidad+1)}));
-  const catalogRemoveItem=(id)=>setCatalogCart(prev=>safeList(prev).filter(i=>i.id!==id));
-  const catalogClearCart=()=>setCatalogCart([]);
-  const catalogOrderMessage=useMemo(()=>{
-    const items=safeList(catalogCart);
-    if(!items.length) return '';
-    const lines=items.map(i=>`• ${i.nombre} x${i.cantidad} — ${fmt((+i.precio||0)*(+i.cantidad||0))}`);
-    return `Hola, me interesa este pedido de ${config?.nombre||'AdornArte'}:%0A%0A${encodeURIComponent(lines.join('\n'))}%0A%0ATotal: ${encodeURIComponent(fmt(catalogCartTotal))}`;
-  },[catalogCart,catalogCartTotal,config?.nombre]);
-  const catalogOrderLink=(catalogWhatsApp&&catalogCartCount>0)?`https://wa.me/${catalogWhatsApp}?text=${catalogOrderMessage}`:null;
+    const agotado=stock<=0;
+    const productImages=getCatalogImages(prod);
+    const msg=`Hola, me interesa ${agotado?'realizar pedido':'consultar'} de este producto de ${config?.nombre||'AdornArte'}:%0A%0A• Producto: ${encodeURIComponent(prod?.nombre||'')}`+
+      `%0A• Precio: ${encodeURIComponent(fmt(prod?.precio||0))}`+
+      `%0A• Categoría: ${encodeURIComponent(prod?.categoria||'General')}`+
+      `%0A• Estado: ${encodeURIComponent(agotado?'Sin stock - quiero pedirlo':'Disponible')}`+
+      ((prod?.codigoBarras)?`%0A• Código: ${encodeURIComponent(prod.codigoBarras)}`:'');
+    const waLink=catalogWhatsApp?`https://wa.me/${catalogWhatsApp}?text=${msg}`:null;
+    return (
+      <div key={prod.id} style={{background:'#fff',border:'1px solid #efdce7',borderRadius:isMobile?20:24,overflow:'hidden',boxShadow:isFeatured?'0 18px 48px rgba(203,46,113,0.10)':'0 14px 44px rgba(120,80,140,0.08)',display:'flex',flexDirection:'column',minWidth:0}}>
+        <button onClick={()=>openCatalogGallery(prod,0)} style={{position:'relative',aspectRatio:'1 / 1',background:prod?.foto?'#fff':'linear-gradient(135deg,#fff1f7 0%,#f8f3ff 100%)',display:'flex',alignItems:'center',justifyContent:'center',border:'none',padding:0,cursor:'zoom-in'}}>
+          {prod?.foto?<img src={prod.foto} alt={prod?.nombre||''} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<div style={{fontSize:isMobile?48:58}}>🎀</div>}
+          <div style={{position:'absolute',top:10,left:10,display:'flex',gap:6,flexWrap:'wrap'}}>
+            {isNew && <span style={{background:'#cb2e71',color:'#fff',borderRadius:999,padding:'6px 10px',fontWeight:800,fontSize:11}}>Nueva</span>}
+            {isFeatured && <span style={{background:'#fff0f6',color:'#cb2e71',border:'1px solid #f0b8d1',borderRadius:999,padding:'6px 10px',fontWeight:800,fontSize:11}}>Destacado</span>}
+            {agotado && <span style={{background:'#fff3f0',color:'#c2410c',border:'1px solid #fdc4b4',borderRadius:999,padding:'6px 10px',fontWeight:800,fontSize:11}}>Agotado</span>}
+          </div>
+          <div style={{position:'absolute',top:10,right:10,background:'rgba(255,255,255,0.92)',backdropFilter:'blur(8px)',border:'1px solid #f1dbe6',borderRadius:999,padding:'6px 10px',fontWeight:800,fontSize:11,color:'#72536b'}}>
+            {prod?.categoria||'General'}
+          </div>
+          <div style={{position:'absolute',bottom:10,right:10,background:'rgba(43,34,49,0.74)',color:'#fff',borderRadius:999,padding:'6px 10px',fontWeight:800,fontSize:11}}>
+            {productImages.length>1?`${productImages.length} fotos`:'Ver foto'}
+          </div>
+        </button>
+        <div style={{padding:isMobile?'14px 12px 12px':'16px 16px 14px',display:'flex',flexDirection:'column',gap:10,flex:1,minWidth:0}}>
+          <div style={{fontWeight:900,fontSize:isMobile?15:17,lineHeight:1.28,color:'#2f2331',minHeight:isMobile?38:44}}>{prod?.nombre||'Producto'}</div>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+            <div>
+              <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:3}}>Precio</div>
+              <div style={{fontSize:isMobile?20:24,fontWeight:900,color:'#cb2e71'}}>{fmt(prod?.precio||0)}</div>
+            </div>
+            <div style={{textAlign:'right'}}>
+              <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:3}}>Stock</div>
+              <div style={{fontSize:13,fontWeight:800,color:agotado?'#c2410c':'#2f2331'}}>{agotado?'Sin existencias':`${stock} disponible${stock!==1?'s':''}`}</div>
+            </div>
+          </div>
+          {(prod?.codigoBarras||'')&&<div style={{fontSize:11,color:'#8f7c8d',background:'#faf6fa',border:'1px solid #f1e4ef',padding:'8px 10px',borderRadius:12,overflow:'hidden',textOverflow:'ellipsis'}}>Código: {prod.codigoBarras}</div>}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:'auto'}}>
+            {!agotado ? (
+              <button onClick={()=>addCatalogToCart(prod)} style={{border:'none',background:'#cb2e71',color:'#fff',padding:'12px 12px',borderRadius:14,fontWeight:900,fontSize:13,cursor:'pointer'}}>🛒 Agregar</button>
+            ) : (
+              <a href={waLink||'#'} target="_blank" rel="noreferrer" style={{textDecoration:'none',background:'#fff7ed',color:'#c2410c',padding:'12px 12px',borderRadius:14,fontWeight:900,fontSize:13,textAlign:'center',border:'1px solid #fdc4b4',pointerEvents:waLink?'auto':'none',opacity:waLink?1:0.7}}>
+                📦 Realizar pedido
+              </a>
+            )}
+            {waLink?(<a href={waLink} target="_blank" rel="noreferrer" style={{textDecoration:'none',background:agotado?'#fff':'#25D366',color:agotado?'#15803d':'#fff',padding:'12px 12px',borderRadius:14,fontWeight:900,fontSize:13,textAlign:'center',border:agotado?'1px solid #bbf7d0':'none'}}>
+              WhatsApp
+            </a>):(<button onClick={()=>alert('Configura el número de WhatsApp en Configuración → whatsappNumero')} style={{border:'1px solid #eadde6',background:'#fff',color:'#4f3c4f',padding:'12px 12px',borderRadius:14,fontWeight:900,fontSize:13,cursor:'pointer'}}>Configurar</button>)}
+          </div>
+          {!isAll && <button onClick={()=>scrollCatalogTo('catalog-todos')} style={{border:'none',background:'transparent',color:'#8b7989',fontSize:12,fontWeight:800,cursor:'pointer',padding:0,marginTop:2,textAlign:'left'}}>Ver todos los artículos</button>}
+        </div>
+      </div>
+    );
+  };
 
   /* ══════════════════════ LOGIN SCREEN ══════════════════════ */
   /* ── Pantalla de carga mientras se obtienen datos de Supabase ── */
@@ -3556,34 +3649,54 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
 
   if(isCatalogRoute) return(
     <div style={{minHeight:'100vh',background:'linear-gradient(180deg,#fff8fb 0%,#ffffff 36%,#faf8ff 100%)',color:'#2b2231',fontFamily:"'Inter','Segoe UI',sans-serif"}}>
-      <div style={{maxWidth:1280,margin:'0 auto',padding:isMobile?'18px 14px 120px':'24px 20px 48px'}}>
-        <div style={{background:'linear-gradient(135deg,#ffffff 0%,#fff3f8 55%,#f7f3ff 100%)',border:'1px solid #f2dce8',borderRadius:isMobile?24:30,padding:isMobile?'18px 16px':'28px 28px',boxShadow:'0 18px 60px rgba(120,80,140,0.10)',marginBottom:18}}>
-          <div style={{display:'flex',flexDirection:isMobile?'column':'row',alignItems:isMobile?'flex-start':'center',justifyContent:'space-between',gap:16}}>
-            <div style={{display:'flex',alignItems:'center',gap:14,minWidth:0}}>
+      <div style={{maxWidth:1280,margin:'0 auto',padding:isMobile?'18px 14px 110px':'24px 20px 48px'}}>
+        <div style={{position:'sticky',top:10,zIndex:12,display:'flex',justifyContent:'center',pointerEvents:'none'}}>
+          <div style={{display:'flex',gap:8,background:'rgba(255,255,255,0.88)',backdropFilter:'blur(10px)',border:'1px solid #f0dce7',borderRadius:999,padding:8,boxShadow:'0 10px 30px rgba(120,80,140,0.10)',pointerEvents:'auto',overflowX:'auto',maxWidth:'100%'}}>
+            {[
+              {id:'catalog-top',label:'Inicio',icon:'🏠'},
+              {id:'catalog-novedades',label:'Novedades',icon:'✨'},
+              {id:'catalog-destacados',label:'Destacados',icon:'💖'},
+              {id:'catalog-todos',label:'Todos',icon:'🛍️'},
+            ].map(link=>(
+              <button key={link.id} onClick={()=>link.id==='catalog-top'?resetCatalogView():scrollCatalogTo(link.id)} style={{whiteSpace:'nowrap',border:'none',background:'#fff',borderRadius:999,padding:'10px 14px',fontSize:12,fontWeight:800,color:'#6b4f63',cursor:'pointer'}}>
+                {link.icon} {link.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div id="catalog-top" style={{background:'linear-gradient(135deg,#ffffff 0%,#fff3f8 55%,#f7f3ff 100%)',border:'1px solid #f2dce8',borderRadius:isMobile?24:30,padding:isMobile?'18px 16px':'28px 28px',boxShadow:'0 18px 60px rgba(120,80,140,0.10)',marginBottom:18,marginTop:12}}>
+          <div style={{display:'flex',flexDirection:isMobile?'column':'row',alignItems:isMobile?'stretch':'center',justifyContent:'space-between',gap:16}}>
+            <div style={{display:'flex',alignItems:'center',gap:14,minWidth:0,flex:1}}>
               <img src={logo} alt="AdornArte" style={{width:isMobile?64:78,height:isMobile?64:78,borderRadius:18,objectFit:'contain',background:'#fff',padding:8,boxShadow:'0 10px 30px rgba(232,65,122,0.16)',flexShrink:0}}/>
-              <div style={{minWidth:0}}>
-                <div style={{display:'inline-flex',alignItems:'center',gap:8,background:'#fff',border:'1px solid #f1d6e5',color:'#c43d74',padding:'6px 10px',borderRadius:999,fontWeight:800,fontSize:11,letterSpacing:'0.4px',marginBottom:10}}>✨ Novedades + Catálogo disponible</div>
-                <h1 style={{margin:0,fontFamily:'Georgia,serif',fontSize:isMobile?30:42,lineHeight:1.05,color:'#cb2e71'}}>
+              <div style={{minWidth:0,flex:1}}>
+                <div style={{display:'inline-flex',alignItems:'center',gap:8,background:'#fff',border:'1px solid #f1d6e5',color:'#c43d74',padding:'6px 10px',borderRadius:999,fontWeight:800,fontSize:11,letterSpacing:'0.4px',marginBottom:10}}>✨ Novedades + catálogo disponible</div>
+                <button onClick={resetCatalogView} style={{margin:0,padding:0,border:'none',background:'transparent',fontFamily:'Georgia,serif',fontSize:isMobile?30:42,lineHeight:1.05,color:'#cb2e71',fontWeight:900,cursor:'pointer',textAlign:'left'}}>
                   {config?.nombre||'AdornArte'}
-                </h1>
+                </button>
                 <p style={{margin:'8px 0 0',fontSize:isMobile?14:15,color:'#7a6678',maxWidth:620,lineHeight:1.55}}>
                   Mira los productos disponibles, descubre las novedades y arma tu pedido directo por WhatsApp.
                 </p>
               </div>
             </div>
+
             <div style={{display:'grid',gridTemplateColumns:isMobile?'repeat(2,minmax(0,1fr))':'repeat(2,minmax(130px,1fr))',gap:10,width:isMobile?'100%':'auto'}}>
               <div style={{background:'#fff',border:'1px solid #f0d9e6',borderRadius:18,padding:'12px 14px'}}>
                 <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:4}}>Productos</div>
                 <div style={{fontSize:22,fontWeight:900,color:'#2f2432'}}>{catalogProducts.length}</div>
               </div>
-              <div style={{background:'#fff',border:'1px solid #f0d9e6',borderRadius:18,padding:'12px 14px'}}>
-                <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:4}}>Carrito</div>
+              <button onClick={()=>setCatalogCartOpen(v=>!v)} style={{background:'#fff',border:'1px solid #f0d9e6',borderRadius:18,padding:'12px 14px',cursor:'pointer',textAlign:'left',position:'relative'}}>
+                <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:4,display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+                  <span>Carrito</span>
+                  <span style={{fontSize:18}}>🛒</span>
+                </div>
                 <div style={{fontSize:22,fontWeight:900,color:'#2f2432'}}>{catalogCartCount}</div>
-              </div>
+                {!!catalogCartCount && <div style={{fontSize:12,color:'#cb2e71',fontWeight:800,marginTop:2}}>{fmt(catalogCartTotal)}</div>}
+              </button>
             </div>
           </div>
 
-          <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'minmax(280px,1.4fr) minmax(180px,.8fr) auto auto',gap:12,marginTop:18,alignItems:'stretch'}}>
+          <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'minmax(280px,1.4fr) minmax(180px,.8fr) auto',gap:12,marginTop:18,alignItems:'stretch'}}>
             <div style={{background:'#fff',border:'1px solid #eedbe6',borderRadius:18,padding:'0 14px',display:'flex',alignItems:'center',minHeight:54}}>
               <span style={{fontSize:18,marginRight:10}}>🔎</span>
               <input value={catalogSearch} onChange={e=>setCatalogSearch(e.target.value)} placeholder="Buscar por nombre, categoría o código" style={{width:'100%',border:'none',outline:'none',background:'transparent',fontSize:15,color:'#362a37'}}/>
@@ -3591,183 +3704,147 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
             <select value={catalogCategory} onChange={e=>setCatalogCategory(e.target.value)} style={{minHeight:54,borderRadius:18,border:'1px solid #eedbe6',background:'#fff',padding:'0 14px',fontSize:14,fontWeight:700,color:'#4a3948'}}>
               {catalogCategories.map(cat=><option key={cat} value={cat}>{cat}</option>)}
             </select>
-            <button onClick={()=>setCatalogOnlyAvailable(v=>!v)} style={{minHeight:54,borderRadius:18,border:`1px solid ${catalogOnlyAvailable?'#f0b8d1':'#eadde6'}`,background:catalogOnlyAvailable?'#fff0f6':'#fff',padding:'0 16px',fontSize:13,fontWeight:800,color:catalogOnlyAvailable?'#c42d72':'#5b4657',cursor:'pointer'}}>
-              {catalogOnlyAvailable?'✅ Solo disponibles':'📦 Mostrar todos'}
-            </button>
             <button onClick={()=>{try{navigator.share?navigator.share({title:'Catálogo AdornArte',text:'Mira el catálogo disponible',url:catalogLink}):navigator.clipboard?.writeText(catalogLink);}catch{}}} style={{minHeight:54,borderRadius:18,border:'1px solid #eadde6',background:'#fff',padding:'0 16px',fontSize:13,fontWeight:800,color:'#5b4657',cursor:'pointer'}}>
               🔗 Compartir
             </button>
           </div>
+
+          {catalogCartOpen && (
+            <div style={{marginTop:14,background:'#fff',border:'1px solid #f0dbe7',borderRadius:22,padding:isMobile?'14px 12px':'18px 18px',boxShadow:'0 14px 40px rgba(120,80,140,0.08)'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:12}}>
+                <div>
+                  <div style={{fontWeight:900,fontSize:18,color:'#2f2331'}}>🛒 Tu carrito</div>
+                  <div style={{fontSize:13,color:'#8b7989'}}>Desde aquí puedes revisar, quitar o enviar tu pedido.</div>
+                </div>
+                <button onClick={()=>setCatalogCartOpen(false)} style={{border:'1px solid #eadde6',background:'#fff',borderRadius:12,padding:'8px 10px',cursor:'pointer',fontWeight:800,color:'#7a6175'}}>Cerrar</button>
+              </div>
+              {catalogCartCount===0?(
+                <div style={{border:'1px dashed #ead9e5',borderRadius:18,padding:'18px 14px',textAlign:'center',color:'#8b7989',fontWeight:700}}>Tu carrito está vacío por ahora.</div>
+              ):(
+                <>
+                  <div style={{display:'grid',gap:10}}>
+                    {catalogCart.map(item=>(
+                      <div key={item.id} style={{display:'grid',gridTemplateColumns:isMobile?'56px 1fr auto':'70px 1fr auto',gap:12,alignItems:'center',border:'1px solid #f1e2eb',borderRadius:18,padding:'10px 12px'}}>
+                        <div style={{width:isMobile?56:70,height:isMobile?56:70,borderRadius:16,overflow:'hidden',background:'#fff5f9',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                          {item?.foto?<img src={item.foto} alt={item.nombre} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<span style={{fontSize:24}}>🎀</span>}
+                        </div>
+                        <div style={{minWidth:0}}>
+                          <div style={{fontWeight:900,color:'#2f2331',fontSize:15,lineHeight:1.25}}>{item.nombre}</div>
+                          <div style={{fontSize:12,color:'#8b7989',marginTop:4}}>{item.categoria||'General'}</div>
+                          <div style={{fontSize:14,fontWeight:900,color:'#cb2e71',marginTop:6}}>{fmt((item.precio||0)*(item.cantidad||0))}</div>
+                        </div>
+                        <div style={{display:'flex',flexDirection:'column',alignItems:'flex-end',gap:8}}>
+                          <div style={{display:'flex',alignItems:'center',gap:8}}>
+                            <button onClick={()=>changeCatalogCartQty(item.id,-1)} style={{width:32,height:32,borderRadius:10,border:'1px solid #e8d6e2',background:'#fff',cursor:'pointer',fontWeight:900}}>−</button>
+                            <div style={{minWidth:28,textAlign:'center',fontWeight:900}}>{item.cantidad}</div>
+                            <button onClick={()=>changeCatalogCartQty(item.id,1)} style={{width:32,height:32,borderRadius:10,border:'1px solid #e8d6e2',background:'#fff',cursor:'pointer',fontWeight:900}}>＋</button>
+                          </div>
+                          <button onClick={()=>removeCatalogFromCart(item.id)} style={{border:'none',background:'transparent',color:'#c2410c',cursor:'pointer',fontWeight:800}}>Quitar</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div style={{display:'flex',flexDirection:isMobile?'column':'row',alignItems:isMobile?'stretch':'center',justifyContent:'space-between',gap:12,marginTop:14}}>
+                    <div>
+                      <div style={{fontSize:12,color:'#8b7989',fontWeight:700}}>Total del pedido</div>
+                      <div style={{fontSize:26,fontWeight:900,color:'#cb2e71'}}>{fmt(catalogCartTotal)}</div>
+                    </div>
+                    {catalogWhatsApp?(
+                      <a href={`https://wa.me/${catalogWhatsApp}?text=${encodeURIComponent(`Hola, quiero realizar este pedido de ${config?.nombre||'AdornArte'}:\n\n`)}${catalogCartMessage}%0A%0ATotal: ${encodeURIComponent(fmt(catalogCartTotal))}`} target="_blank" rel="noreferrer" style={{textDecoration:'none',background:'#25D366',color:'#fff',padding:'14px 18px',borderRadius:16,fontWeight:900,textAlign:'center'}}>
+                        Enviar pedido por WhatsApp
+                      </a>
+                    ):(
+                      <button onClick={()=>alert('Configura el número de WhatsApp en Configuración → whatsappNumero')} style={{border:'1px solid #eadde6',background:'#fff',color:'#4f3c4f',padding:'14px 18px',borderRadius:16,fontWeight:900,cursor:'pointer'}}>Configurar WhatsApp</button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </div>
 
-        {catalogNovedades.length>0&&(
-          <div style={{marginBottom:18}}>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:10}}>
+        {!!catalogNovedades.length && (
+          <section id="catalog-novedades" style={{marginBottom:18}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,marginBottom:10}}>
               <div>
-                <h2 style={{margin:0,fontSize:isMobile?20:24,fontWeight:900,color:'#2f2432'}}>✨ Novedades</h2>
-                <div style={{fontSize:13,color:'#8c7588',marginTop:4}}>Lo más nuevo que acaba de entrar</div>
+                <div style={{fontWeight:900,fontSize:isMobile?26:32,color:'#2f2331'}}>✨ Novedades</div>
+                <div style={{fontSize:13,color:'#8b7989'}}>Lo más nuevo que acaba de entrar</div>
               </div>
-              <div style={{background:'#fff',border:'1px solid #f0d9e6',borderRadius:999,padding:'7px 12px',fontSize:12,fontWeight:800,color:'#cb2e71'}}>{catalogNovedades.length} producto{catalogNovedades.length!==1?'s':''}</div>
+              <button onClick={()=>scrollCatalogTo('catalog-todos')} style={{border:'1px solid #eadde6',background:'#fff',padding:'10px 14px',borderRadius:999,cursor:'pointer',fontWeight:800,color:'#6b4f63'}}>Ver todos los artículos</button>
+            </div>
+            <div style={{display:'grid',gridTemplateColumns:isMobile?'repeat(2,minmax(0,1fr))':'repeat(auto-fit,minmax(240px,1fr))',gap:isMobile?12:16}}>
+              {catalogNovedades.map(prod=>renderCatalogCard(prod,true))}
+            </div>
+          </section>
+        )}
+
+        {!!catalogDestacados.length && (
+          <section id="catalog-destacados" style={{marginBottom:18,background:'#fff',border:'1px solid #f0dbe7',borderRadius:26,padding:isMobile?'14px 12px':'18px 18px',boxShadow:'0 12px 36px rgba(120,80,140,0.08)'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,marginBottom:10}}>
+              <div>
+                <div style={{fontWeight:900,fontSize:isMobile?24:28,color:'#2f2331'}}>💖 Destacados</div>
+                <div style={{fontSize:13,color:'#8b7989'}}>Ideas para regalar o pedir más rápido</div>
+              </div>
+              <button onClick={()=>scrollCatalogTo('catalog-todos')} style={{border:'1px solid #eadde6',background:'#fff',padding:'10px 14px',borderRadius:999,cursor:'pointer',fontWeight:800,color:'#6b4f63'}}>Ver todos</button>
             </div>
             <div style={{display:'grid',gridTemplateColumns:isMobile?'repeat(2,minmax(0,1fr))':'repeat(auto-fit,minmax(220px,1fr))',gap:isMobile?12:14}}>
-              {catalogNovedades.map(prod=>{
-                const stock=stockTotal(prod);
-                const waLink=catalogWhatsApp?`https://wa.me/${catalogWhatsApp}?text=${encodeURIComponent(`Hola, me interesa esta novedad de ${config?.nombre||'AdornArte'}: ${prod?.nombre||''} - ${fmt(prod?.precio||0)}`)}`:null;
-                return <div key={`nov-${prod.id}`} style={{background:'linear-gradient(180deg,#ffffff 0%,#fff8fb 100%)',border:'1px solid #f0dce7',borderRadius:22,padding:12,boxShadow:'0 14px 38px rgba(120,80,140,0.08)',display:'flex',flexDirection:'column',gap:10}}>
-                  <div style={{position:'relative',aspectRatio:'1 / 1',borderRadius:18,overflow:'hidden',background:prod?.foto?'#fff':'linear-gradient(135deg,#fff1f7 0%,#f8f3ff 100%)',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                    {prod?.foto?<img src={prod.foto} alt={prod?.nombre||''} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<div style={{fontSize:isMobile?42:54}}>🆕</div>}
-                    <div style={{position:'absolute',left:10,top:10,background:'#cb2e71',color:'#fff',padding:'6px 10px',borderRadius:999,fontSize:10,fontWeight:900}}>Nueva</div>
-                  </div>
-                  <div style={{fontWeight:900,fontSize:isMobile?14:16,color:'#2f2331',lineHeight:1.3,minHeight:isMobile?36:40}}>{prod?.nombre||'Producto'}</div>
-                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
-                    <div style={{fontSize:isMobile?18:22,fontWeight:900,color:'#cb2e71'}}>{fmt(prod?.precio||0)}</div>
-                    <div style={{fontSize:11,color:'#7f6a7d',fontWeight:700}}>{stock} disp.</div>
-                  </div>
-                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginTop:'auto'}}>
-                    <button onClick={()=>catalogAddToCart(prod)} style={{border:'none',background:'#cb2e71',color:'#fff',padding:'11px 10px',borderRadius:14,fontWeight:900,fontSize:12,cursor:'pointer'}}>🛒 Agregar</button>
-                    {waLink?<a href={waLink} target="_blank" rel="noreferrer" style={{textDecoration:'none',background:'#25D366',color:'#fff',padding:'11px 10px',borderRadius:14,fontWeight:900,fontSize:12,textAlign:'center'}}>WhatsApp</a>:<button onClick={()=>alert('Configura el número de WhatsApp en Configuración → whatsappNumero')} style={{border:'1px solid #eadde6',background:'#fff',color:'#4f3c4f',padding:'11px 10px',borderRadius:14,fontWeight:900,fontSize:12,cursor:'pointer'}}>WhatsApp</button>}
-                  </div>
-                </div>;
-              })}
+              {catalogDestacados.map(prod=>renderCatalogCard(prod,false,true))}
             </div>
-          </div>
+          </section>
         )}
 
-        {catalogDestacados.length>0&&(
-          <div style={{marginBottom:18,background:'#fff',border:'1px solid #f0dce7',borderRadius:22,padding:isMobile?'16px 14px':'18px 18px',boxShadow:'0 12px 40px rgba(120,80,140,0.08)'}}>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:12}}>
-              <div>
-                <h2 style={{margin:0,fontSize:isMobile?19:22,fontWeight:900,color:'#2f2432'}}>💖 Destacados</h2>
-                <div style={{fontSize:13,color:'#8c7588',marginTop:4}}>Ideas para regalar o pedir más rápido</div>
-              </div>
+        <section id="catalog-todos">
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,marginBottom:10}}>
+            <div>
+              <div style={{fontWeight:900,fontSize:isMobile?26:32,color:'#2f2331'}}>🛍️ Todos los artículos</div>
+              <div style={{fontSize:13,color:'#8b7989'}}>Siempre visibles, aunque se hayan quedado sin stock.</div>
             </div>
-            <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'repeat(auto-fit,minmax(180px,1fr))',gap:10}}>
-              {catalogDestacados.map(prod=>{
-                const stock=stockTotal(prod);
-                return <button key={`dest-${prod.id}`} onClick={()=>{setCatalogSearch(prod?.nombre||'');window.scrollTo?.({top:0,behavior:'smooth'});}} style={{textAlign:'left',border:'1px solid #f0dce7',background:'#fff9fc',borderRadius:16,padding:'12px 14px',cursor:'pointer'}}>
-                  <div style={{fontSize:10,fontWeight:900,color:'#cb2e71',marginBottom:4}}>DESTACADO</div>
-                  <div style={{fontWeight:800,fontSize:14,color:'#2f2331',lineHeight:1.3,marginBottom:6}}>{prod?.nombre||'Producto'}</div>
-                  <div style={{fontSize:12,fontWeight:800,color:'#cb2e71'}}>{fmt(prod?.precio||0)}</div>
-                  <div style={{fontSize:11,color:'#836f82',marginTop:4}}>{stock>0?`${stock} disponible${stock!==1?'s':''}`:'Agotado'}</div>
-                </button>;
-              })}
+            <div style={{display:'inline-flex',alignItems:'center',gap:8,background:'#fff',border:'1px solid #f0dbe7',borderRadius:999,padding:'8px 12px',fontSize:12,fontWeight:800,color:'#6b4f63'}}>
+              {catalogProducts.length} artículos
             </div>
           </div>
-        )}
 
-        {catalogProducts.length===0?(
-          <div style={{background:'#fff',border:'1px solid #f0dbe7',borderRadius:24,padding:isMobile?'26px 18px':'36px 28px',textAlign:'center',boxShadow:'0 12px 40px rgba(120,80,140,0.08)'}}>
-            <div style={{fontSize:42,marginBottom:8}}>🧁</div>
-            <div style={{fontWeight:900,fontSize:22,color:'#3a2d39'}}>No encontramos productos</div>
-            <div style={{fontSize:14,color:'#887587',marginTop:8}}>Prueba con otra búsqueda o cambia la categoría seleccionada.</div>
-          </div>
-        ):(
-          <div style={{display:'grid',gridTemplateColumns:isMobile?'repeat(2,minmax(0,1fr))':'repeat(auto-fit,minmax(240px,1fr))',gap:isMobile?12:16}}>
-            {catalogProducts.map(prod=>{
-              const stock=stockTotal(prod);
-              const agotado=stock<=0;
-              const msg=`Hola, me interesa este producto de ${config?.nombre||'AdornArte'}:%0A%0A• Producto: ${encodeURIComponent(prod?.nombre||'')}`+
-                `%0A• Precio: ${encodeURIComponent(fmt(prod?.precio||0))}`+
-                `%0A• Categoría: ${encodeURIComponent(prod?.categoria||'General')}`+
-                ((prod?.codigoBarras)?`%0A• Código: ${encodeURIComponent(prod.codigoBarras)}`:'');
-              const waLink=catalogWhatsApp?`https://wa.me/${catalogWhatsApp}?text=${msg}`:null;
-              const inCart=safeList(catalogCart).find(i=>i.id===prod.id);
-              return (
-                <div key={prod.id} style={{background:'#fff',border:'1px solid #efdce7',borderRadius:isMobile?20:24,overflow:'hidden',boxShadow:'0 14px 44px rgba(120,80,140,0.08)',display:'flex',flexDirection:'column',minWidth:0}}>
-                  <div style={{position:'relative',aspectRatio:'1 / 1',background:prod?.foto?'#fff':'linear-gradient(135deg,#fff1f7 0%,#f8f3ff 100%)',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                    {prod?.foto?<img src={prod.foto} alt={prod?.nombre||''} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<div style={{fontSize:isMobile?48:58}}>🎀</div>}
-                    <div style={{position:'absolute',top:10,left:10,background:agotado?'#fff3f0':'#effbf4',color:agotado?'#c2410c':'#15803d',border:`1px solid ${agotado?'#fdc4b4':'#b7e6c8'}`,borderRadius:999,padding:'6px 10px',fontWeight:800,fontSize:11}}>
-                      {agotado?'Agotado':'Disponible'}
-                    </div>
-                    {catalogNovedades.some(n=>n.id===prod.id)&&<div style={{position:'absolute',bottom:10,left:10,background:'#cb2e71',color:'#fff',borderRadius:999,padding:'6px 10px',fontWeight:900,fontSize:10}}>🆕 Novedad</div>}
-                    <div style={{position:'absolute',top:10,right:10,background:'rgba(255,255,255,0.92)',backdropFilter:'blur(8px)',border:'1px solid #f1dbe6',borderRadius:999,padding:'6px 10px',fontWeight:800,fontSize:11,color:'#72536b'}}>
-                      {prod?.categoria||'General'}
-                    </div>
-                  </div>
-                  <div style={{padding:isMobile?'14px 12px 12px':'16px 16px 14px',display:'flex',flexDirection:'column',gap:10,flex:1,minWidth:0}}>
-                    <div style={{fontWeight:900,fontSize:isMobile?15:17,lineHeight:1.28,color:'#2f2331',minHeight:isMobile?38:44}}>{prod?.nombre||'Producto'}</div>
-                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
-                      <div>
-                        <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:3}}>Precio</div>
-                        <div style={{fontSize:isMobile?20:24,fontWeight:900,color:'#cb2e71'}}>{fmt(prod?.precio||0)}</div>
-                      </div>
-                      <div style={{textAlign:'right'}}>
-                        <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:3}}>Stock</div>
-                        <div style={{fontSize:13,fontWeight:800,color:agotado?'#c2410c':'#2f2331'}}>{agotado?'Sin existencias':`${stock} disponible${stock!==1?'s':''}`}</div>
-                      </div>
-                    </div>
-                    {(prod?.codigoBarras||'')&&<div style={{fontSize:11,color:'#8f7c8d',background:'#faf6fa',border:'1px solid #f1e4ef',padding:'8px 10px',borderRadius:12,overflow:'hidden',textOverflow:'ellipsis'}}>Código: {prod.codigoBarras}</div>}
-                    {inCart&&<div style={{background:'#fff0f6',border:'1px solid #f5bfd6',borderRadius:12,padding:'8px 10px',fontSize:11,fontWeight:800,color:'#c42d72'}}>🛒 En carrito: {inCart.cantidad}</div>}
-                    <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'1fr 1fr',gap:8,marginTop:'auto'}}>
-                      <button onClick={()=>catalogAddToCart(prod)} disabled={agotado} style={{border:'none',background:agotado?'#e5e7eb':'#cb2e71',color:agotado?'#6b7280':'#fff',padding:'12px 14px',borderRadius:14,fontWeight:900,fontSize:13,cursor:agotado?'not-allowed':'pointer',opacity:agotado?0.75:1}}>
-                        {agotado?'Sin stock':'🛒 Agregar al carrito'}
-                      </button>
-                      {waLink?(<a href={waLink} target="_blank" rel="noreferrer" style={{textDecoration:'none',background:agotado?'#f3f4f6':'#25D366',color:agotado?'#6b7280':'#fff',padding:'12px 14px',borderRadius:14,fontWeight:900,fontSize:13,textAlign:'center',pointerEvents:agotado?'none':'auto',opacity:agotado?0.7:1}}>
-                        {agotado?'Producto agotado':'Consultar por WhatsApp'}
-                      </a>):(<button onClick={()=>alert('Configura el número de WhatsApp en Configuración → whatsappNumero')} style={{border:'1px solid #eadde6',background:'#fff',color:'#4f3c4f',padding:'12px 14px',borderRadius:14,fontWeight:900,fontSize:13,cursor:'pointer'}}>Configurar WhatsApp</button>)}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        )}
+          {catalogProducts.length===0?(
+            <div style={{background:'#fff',border:'1px solid #f0dbe7',borderRadius:24,padding:isMobile?'26px 18px':'36px 28px',textAlign:'center',boxShadow:'0 12px 40px rgba(120,80,140,0.08)'}}>
+              <div style={{fontSize:42,marginBottom:8}}>🧁</div>
+              <div style={{fontWeight:900,fontSize:22,color:'#3a2d39'}}>No encontramos productos</div>
+              <div style={{fontSize:14,color:'#887587',marginTop:8}}>Prueba con otra búsqueda o cambia la categoría seleccionada.</div>
+            </div>
+          ):(
+            <div style={{display:'grid',gridTemplateColumns:isMobile?'repeat(2,minmax(0,1fr))':'repeat(auto-fit,minmax(240px,1fr))',gap:isMobile?12:16}}>
+              {catalogProducts.map(prod=>renderCatalogCard(prod,false,false,true))}
+            </div>
+          )}
+        </section>
       </div>
 
-      {catalogCartCount>0&&(
-        <>
-          <button onClick={()=>setCatalogCartOpen(v=>!v)} style={{position:'fixed',right:isMobile?14:22,bottom:isMobile?18:24,zIndex:80,border:'none',background:'#cb2e71',color:'#fff',borderRadius:999,padding:isMobile?'14px 16px':'15px 18px',boxShadow:'0 18px 42px rgba(203,46,113,0.35)',display:'flex',alignItems:'center',gap:10,cursor:'pointer',fontWeight:900,fontSize:14}}>
-            <span style={{fontSize:18}}>🛒</span>
-            <span>{catalogCartCount} artículo{catalogCartCount!==1?'s':''}</span>
-            <span style={{background:'rgba(255,255,255,0.18)',padding:'6px 10px',borderRadius:999}}>{fmt(catalogCartTotal)}</span>
-          </button>
-
-          {catalogCartOpen&&<div onClick={()=>setCatalogCartOpen(false)} style={{position:'fixed',inset:0,background:'rgba(36,20,34,0.38)',backdropFilter:'blur(4px)',zIndex:79}}/>}
-          <div style={{position:'fixed',right:isMobile?10:22,bottom:isMobile?82:92,zIndex:81,width:isMobile?'calc(100vw - 20px)':420,maxWidth:'calc(100vw - 20px)',background:'#fff',border:'1px solid #efdce7',borderRadius:26,boxShadow:'0 26px 80px rgba(36,20,34,0.22)',padding:16,transform:catalogCartOpen?'translateY(0) scale(1)':'translateY(20px) scale(0.98)',opacity:catalogCartOpen?1:0,pointerEvents:catalogCartOpen?'auto':'none',transition:'all .22s ease'}}>
-            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginBottom:12}}>
+      {catalogGallery.open && (
+        <div onClick={closeCatalogGallery} style={{position:'fixed',inset:0,zIndex:80,background:'rgba(31,22,32,0.74)',backdropFilter:'blur(6px)',display:'flex',alignItems:'center',justifyContent:'center',padding:isMobile?12:24}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:'min(980px,100%)',maxHeight:'90vh',overflow:'auto',background:'#fff',borderRadius:26,padding:isMobile?'14px 12px':'18px',boxShadow:'0 24px 60px rgba(0,0,0,0.25)'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:12,marginBottom:12}}>
               <div>
-                <div style={{fontWeight:900,fontSize:19,color:'#2f2432'}}>🛍️ Tu carrito</div>
-                <div style={{fontSize:12,color:'#8c7588',marginTop:2}}>{catalogCartCount} artículo{catalogCartCount!==1?'s':''} · Total {fmt(catalogCartTotal)}</div>
+                <div style={{fontWeight:900,fontSize:isMobile?22:28,color:'#2f2331'}}>{catalogGallery.product?.nombre||'Producto'}</div>
+                <div style={{fontSize:13,color:'#8b7989'}}>Desliza o toca una miniatura para ver todas las imágenes</div>
               </div>
-              <button onClick={catalogClearCart} style={{border:'1px solid #f2c8da',background:'#fff5f8',color:'#c42d72',padding:'8px 12px',borderRadius:12,fontWeight:800,fontSize:12,cursor:'pointer'}}>Vaciar</button>
+              <button onClick={closeCatalogGallery} style={{border:'1px solid #eadde6',background:'#fff',borderRadius:14,padding:'10px 12px',cursor:'pointer',fontWeight:800}}>Cerrar</button>
             </div>
-            <div style={{display:'flex',flexDirection:'column',gap:10,maxHeight:isMobile?'50vh':'52vh',overflowY:'auto',paddingRight:4}}>
-              {safeList(catalogCart).map(item=><div key={item.id} style={{border:'1px solid #f2dce8',borderRadius:18,padding:12,display:'grid',gridTemplateColumns:'56px 1fr',gap:12,alignItems:'center'}}>
-                <div style={{width:56,height:56,borderRadius:14,overflow:'hidden',background:item.foto?'#fff':'linear-gradient(135deg,#fff1f7 0%,#f8f3ff 100%)',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                  {item.foto?<img src={item.foto} alt={item.nombre} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<div style={{fontSize:26}}>🎀</div>}
-                </div>
-                <div style={{minWidth:0}}>
-                  <div style={{display:'flex',justifyContent:'space-between',gap:10,alignItems:'flex-start'}}>
-                    <div style={{fontWeight:800,fontSize:14,color:'#2f2331',lineHeight:1.3}}>{item.nombre}</div>
-                    <button onClick={()=>catalogRemoveItem(item.id)} style={{background:'none',border:'none',color:'#c42d72',fontSize:16,cursor:'pointer'}}>✕</button>
-                  </div>
-                  <div style={{fontSize:12,color:'#8b7788',marginTop:3}}>{fmt(item.precio)} c/u</div>
-                  <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,marginTop:9}}>
-                    <div style={{display:'inline-flex',alignItems:'center',gap:8,background:'#faf6fa',border:'1px solid #f0dce7',borderRadius:999,padding:'4px 6px'}}>
-                      <button onClick={()=>catalogDecQty(item.id)} style={{border:'none',background:'#fff',width:28,height:28,borderRadius:999,cursor:'pointer',fontWeight:900,color:'#4f3c4f'}}>−</button>
-                      <span style={{minWidth:18,textAlign:'center',fontWeight:900,color:'#2f2331'}}>{item.cantidad}</span>
-                      <button onClick={()=>catalogIncQty(item.id)} disabled={item.cantidad>=(item.stockDisponible||999)} style={{border:'none',background:'#fff',width:28,height:28,borderRadius:999,cursor:item.cantidad>=(item.stockDisponible||999)?'not-allowed':'pointer',fontWeight:900,color:item.cantidad>=(item.stockDisponible||999)?'#b8a8b5':'#4f3c4f'}}>+</button>
-                    </div>
-                    <div style={{fontWeight:900,color:'#cb2e71',fontSize:14}}>{fmt((+item.precio||0)*(+item.cantidad||0))}</div>
-                  </div>
-                </div>
-              </div>)}
-            </div>
-            <div style={{marginTop:14,display:'grid',gap:10}}>
-              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',background:'#fff8fb',border:'1px solid #f4d9e7',borderRadius:16,padding:'12px 14px'}}>
-                <span style={{fontWeight:800,color:'#6c5869'}}>Total pedido</span>
-                <span style={{fontWeight:900,fontSize:20,color:'#cb2e71'}}>{fmt(catalogCartTotal)}</span>
+            <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'minmax(0,1fr) 140px',gap:14}}>
+              <div style={{background:'#fff7fb',border:'1px solid #f0dbe7',borderRadius:24,overflow:'hidden',minHeight:isMobile?280:520,display:'flex',alignItems:'center',justifyContent:'center'}}>
+                {catalogGalleryImages[catalogGallery.index]?<img src={catalogGalleryImages[catalogGallery.index]} alt={catalogGallery.product?.nombre||''} style={{width:'100%',height:'100%',objectFit:'contain'}}/>:<div style={{fontSize:54}}>🎀</div>}
               </div>
-              {catalogOrderLink?
-                <a href={catalogOrderLink} target="_blank" rel="noreferrer" style={{textDecoration:'none',background:'#25D366',color:'#fff',padding:'14px 16px',borderRadius:16,fontWeight:900,fontSize:14,textAlign:'center',boxShadow:'0 12px 28px rgba(37,211,102,0.22)'}}>💬 Enviar pedido por WhatsApp</a>
-                :<button onClick={()=>alert('Configura el número de WhatsApp en Configuración → whatsappNumero')} style={{border:'1px solid #eadde6',background:'#fff',color:'#4f3c4f',padding:'14px 16px',borderRadius:16,fontWeight:900,fontSize:14,cursor:'pointer'}}>Configurar WhatsApp para pedidos</button>}
+              <div style={{display:'grid',gridTemplateColumns:isMobile?'repeat(auto-fit,minmax(74px,1fr))':'1fr',gap:10,alignContent:'flex-start'}}>
+                {catalogGalleryImages.map((img,idx)=>(
+                  <button key={img+idx} onClick={()=>setCatalogGallery(prev=>({...prev,index:idx}))} style={{border:idx===catalogGallery.index?'2px solid #cb2e71':'1px solid #eadde6',background:'#fff',borderRadius:18,padding:0,overflow:'hidden',cursor:'pointer',aspectRatio:'1 / 1'}}>
+                    <img src={img} alt="" style={{width:'100%',height:'100%',objectFit:'cover'}}/>
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
-        </>
+        </div>
       )}
     </div>
   );
-
 
   if(dbLoading) return(
     <div style={{minHeight:'100vh',background:'linear-gradient(135deg,#fce7ef 0%,#f5f4f7 50%,#ede9fe 100%)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',fontFamily:"'Inter','Segoe UI',sans-serif"}}>
