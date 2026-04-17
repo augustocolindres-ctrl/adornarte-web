@@ -114,6 +114,31 @@ const isBirthdayToday=fecha=>{if(!fecha)return false;const t=new Date();const b=
 /* stock real (suma variantes si las tiene) */
 const stockTotal=p=>p.variantes?.length>0?p.variantes.reduce((a,v)=>a+v.stock,0):p.stock;
 
+const productImages = p => {
+  const extra = safeList(p?.imagenes).filter(Boolean);
+  const primary = p?.foto ? [p.foto] : [];
+  return Array.from(new Set([...primary, ...extra]));
+};
+const productPrimaryImage = p => productImages(p)[0] || p?.foto || '';
+const normalizeProductPayload = (raw = {}) => {
+  const imagenes = Array.from(new Set([
+    ...(raw?.foto ? [raw.foto] : []),
+    ...safeList(raw?.imagenes).filter(Boolean)
+  ]));
+  const estadoBase = String(raw?.estado || '').trim().toLowerCase();
+  const estado = estadoBase || ((+raw?.stock || 0) > 0 ? 'disponible' : 'agotado');
+  return {
+    ...raw,
+    foto: imagenes[0] || '',
+    imagenes,
+    marca: raw?.marca || '',
+    descripcionCorta: raw?.descripcionCorta || '',
+    estado,
+    precioOferta: raw?.precioOferta === '' || raw?.precioOferta == null ? '' : +raw.precioOferta,
+    visibleCatalogo: raw?.visibleCatalogo !== false,
+  };
+};
+
 /* ─── STORAGE ────────────────────────────────────────────── */
 const KEYS={
   products:'aa_products',clientes:'aa_clientes',ventas:'aa_ventas',
@@ -828,7 +853,7 @@ export default function App(){
   const [catalogCartOpen,setCatalogCartOpen]=useState(false);
 
   /* ── forms ── */
-  const [pForm, setPForm] = useState({nombre:'',categoria:'',stock:'',precio:'',costo:'',codigoBarras:'',foto:'',stockMinimo:'5',proveedorId:''});
+  const [pForm, setPForm] = useState({nombre:'',categoria:'',stock:'',precio:'',precioOferta:'',costo:'',codigoBarras:'',foto:'',imagenes:[],descripcionCorta:'',marca:'',estado:'disponible',visibleCatalogo:true,stockMinimo:'5',proveedorId:''});
   const [pErr,  setPErr]  = useState({nombre:false,precio:false,costo:false});
   const [pVariantes,setPVariantes] = useState([]); /* [{id,nombre,stock}] */
   const [pVarForm,setPVarForm] = useState({nombre:'',stock:''}); /* form temporal nueva variante */
@@ -1839,10 +1864,43 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
 
   /* ── FOTO ── */
   const handleFoto=e=>{
-    const file=e.target.files[0];if(!file)return;
+    const file=e.target.files?.[0];if(!file)return;
     if(file.size>800000){showToast('Imagen muy grande (máx 800KB)',C.red);return;}
-    const r=new FileReader();r.onload=ev=>setPForm(f=>({...f,foto:ev.target.result}));r.readAsDataURL(file);
+    const r=new FileReader();
+    r.onload=ev=>setPForm(f=>{
+      const src=ev.target.result;
+      const imgs=[src,...safeList(f.imagenes).filter(Boolean).filter(x=>x!==src)];
+      return {...f,foto:src,imagenes:imgs};
+    });
+    r.readAsDataURL(file);
   };
+  const handleExtraFotos=e=>{
+    const files=Array.from(e.target.files||[]);
+    if(!files.length)return;
+    const readers=files.map(file=>new Promise((resolve,reject)=>{
+      if(file.size>800000){reject(new Error(`"${file.name}" supera 800KB`));return;}
+      const r=new FileReader();
+      r.onload=ev=>resolve(ev.target.result);
+      r.onerror=()=>reject(new Error(`No se pudo leer "${file.name}"`));
+      r.readAsDataURL(file);
+    }));
+    Promise.all(readers).then(imgs=>{
+      setPForm(f=>{
+        const merged=Array.from(new Set([...(f.foto?[f.foto]:[]),...safeList(f.imagenes),...imgs].filter(Boolean)));
+        return {...f,foto:merged[0]||'',imagenes:merged};
+      });
+      showToast(`✅ ${imgs.length} imagen${imgs.length!==1?'es':''} agregada${imgs.length!==1?'s':''}`);
+    }).catch(err=>showToast(err.message||'No se pudieron cargar las imágenes',C.red))
+      .finally(()=>{try{e.target.value='';}catch{}});
+  };
+  const setMainProductImage=img=>setPForm(f=>{
+    const imgs=[img,...safeList(f.imagenes).filter(Boolean).filter(x=>x!==img)];
+    return {...f,foto:img||'',imagenes:imgs};
+  });
+  const removeProductImage=img=>setPForm(f=>{
+    const imgs=safeList(f.imagenes).filter(x=>x&&x!==img);
+    return {...f,foto:(f.foto===img?(imgs[0]||''):f.foto),imagenes:imgs};
+  });
 
   /* ── BARCODE ── */
   const findByBarcode=code=>{
@@ -1995,37 +2053,76 @@ ${orden.nota?`<div style="margin-top:14px;background:#fff8f0;border:1px solid #f
   };
 
   /* ── PRODUCTOS ── */
-  const openAddP=()=>{setPForm({nombre:'',categoria:'',stock:'',precio:'',costo:'',codigoBarras:'',foto:'',stockMinimo:'5',proveedorId:''});setPErr({nombre:false,precio:false,costo:false});setPVariantes([]);setPVarForm({nombre:'',stock:''});setModal('addP');};
-  const openEditP=p=>{setPForm({nombre:p.nombre,categoria:p.categoria,stock:p.stock,precio:p.precio,costo:p.costo,codigoBarras:p.codigoBarras||'',foto:p.foto||'',stockMinimo:p.stockMinimo||5,proveedorId:p.proveedorId||''});setPErr({nombre:false,precio:false,costo:false});setPVariantes(p.variantes?[...p.variantes.map(v=>({...v}))]:[]); setPVarForm({nombre:'',stock:''});setEdit(p);setModal('editP');};
-  const saveP=()=>{
+  const openAddP=()=>{setPForm({nombre:'',categoria:'',stock:'',precio:'',precioOferta:'',costo:'',codigoBarras:'',foto:'',imagenes:[],descripcionCorta:'',marca:'',estado:'disponible',visibleCatalogo:true,stockMinimo:'5',proveedorId:''});setPErr({nombre:false,precio:false,costo:false});setPVariantes([]);setPVarForm({nombre:'',stock:''});setModal('addP');};
+  const openEditP=p=>{const normalized=normalizeProductPayload(p);setPForm({nombre:normalized.nombre,categoria:normalized.categoria,stock:normalized.stock,precio:normalized.precio,precioOferta:normalized.precioOferta===''?'':normalized.precioOferta,costo:normalized.costo,codigoBarras:normalized.codigoBarras||'',foto:normalized.foto||'',imagenes:safeList(normalized.imagenes),descripcionCorta:normalized.descripcionCorta||'',marca:normalized.marca||'',estado:normalized.estado||'disponible',visibleCatalogo:normalized.visibleCatalogo!==false,stockMinimo:normalized.stockMinimo||5,proveedorId:normalized.proveedorId||''});setPErr({nombre:false,precio:false,costo:false});setPVariantes(p.variantes?[...p.variantes.map(v=>({...v}))]:[]); setPVarForm({nombre:'',stock:''});setEdit(p);setModal('editP');};
+  const saveP=async()=>{
     const err={nombre:!pForm.nombre.trim(),precio:!pForm.precio||+pForm.precio<=0,costo:!pForm.costo||+pForm.costo<0};
     setPErr(err);if(err.nombre||err.precio||err.costo)return showToast('Campos obligatorios faltantes',C.red);
     const stockFinal=pVariantes.length>0?pVariantes.reduce((a,v)=>a+v.stock,0):+pForm.stock;
+    const payload=normalizeProductPayload({
+      ...pForm,
+      stock:stockFinal,
+      precio:+pForm.precio,
+      costo:+pForm.costo,
+      precioOferta:pForm.precioOferta===''?'':+pForm.precioOferta,
+      stockMinimo:+pForm.stockMinimo,
+      proveedorId:+pForm.proveedorId||null,
+      variantes:pVariantes,
+      estado:pForm.estado||((stockFinal>0)?'disponible':'agotado'),
+      visibleCatalogo:pForm.visibleCatalogo!==false,
+    });
+    let nuevosProductos=safeList(products);
     if(editing){
-      /* registrar cambio de precio si hubo */
       const precioViejo=editing.precio;const costoViejo=editing.costo;
-      const precioNuevo=+pForm.precio;const costoNuevo=+pForm.costo;
+      const precioNuevo=+payload.precio;const costoNuevo=+payload.costo;
       if(precioViejo!==precioNuevo||costoViejo!==costoNuevo){
-        setPrecioHist(h=>[{id:uid(),productoId:editing.id,productoNombre:pForm.nombre||editing.nombre,fecha:today(),precioAntes:precioViejo,precioNuevo,costoAntes:costoViejo,costoNuevo,cajero:session?.nombre||''},...h]);
+        setPrecioHist(h=>[{id:uid(),productoId:editing.id,productoNombre:payload.nombre||editing.nombre,fecha:today(),precioAntes:precioViejo,precioNuevo,costoAntes:costoViejo,costoNuevo,cajero:session?.nombre||''},...h]);
       }
-      setProducts(ps=>safeList(ps).map(p=>p.id===editing.id?{...p,...pForm,stock:stockFinal,precio:+pForm.precio,costo:+pForm.costo,stockMinimo:+pForm.stockMinimo,proveedorId:+pForm.proveedorId||null,variantes:pVariantes}:p));
+      const updated={...editing,...payload,id:editing.id};
+      nuevosProductos=safeList(products).map(p=>p.id===editing.id?updated:p);
+      setProducts(nuevosProductos);
       if(pVariantes.length===0&&+pForm.stock!==editing.stock&&+pForm.stock>=0){
         const delta=+pForm.stock-editing.stock;
-        setMovs(ms=>[{id:uid(),fecha:today(),tipo:delta>0?'ingreso':'salida',productoId:editing.id,productoNombre:pForm.nombre||editing.nombre,cantidad:Math.abs(delta),nota:'Ajuste de inventario (edición)',stockAntes:editing.stock,stockDespues:+pForm.stock,cajero:session?.nombre||''},...ms]);
+        setMovs(ms=>[{id:uid(),fecha:today(),tipo:delta>0?'ingreso':'salida',productoId:editing.id,productoNombre:payload.nombre||editing.nombre,cantidad:Math.abs(delta),nota:'Ajuste de inventario (edición)',stockAntes:editing.stock,stockDespues:+pForm.stock,cajero:session?.nombre||''},...ms]);
       }
       showToast('Actualizado ✓');
     } else {
       const newId=uid();
-      const newProd={id:newId,...pForm,stock:stockFinal,precio:+pForm.precio,costo:+pForm.costo,stockMinimo:+pForm.stockMinimo,proveedorId:+pForm.proveedorId||null,variantes:pVariantes};
-      setProducts(ps=>[...ps,newProd]);
+      const newProd={id:newId,...payload};
+      nuevosProductos=[...safeList(products),newProd];
+      setProducts(nuevosProductos);
       if(stockFinal>0){
-        setMovs(ms=>[{id:uid(),fecha:today(),tipo:'ingreso',productoId:newId,productoNombre:pForm.nombre,cantidad:stockFinal,nota:'Stock inicial — producto nuevo',stockAntes:0,stockDespues:stockFinal,cajero:session?.nombre||''},...ms]);
+        setMovs(ms=>[{id:uid(),fecha:today(),tipo:'ingreso',productoId:newId,productoNombre:payload.nombre,cantidad:stockFinal,nota:'Stock inicial — producto nuevo',stockAntes:0,stockDespues:stockFinal,cajero:session?.nombre||''},...ms]);
       }
       showToast('Producto agregado ✓');
     }
+    const syncStamp=Date.now();
+    try{ await idbSet(KEYS.products, nuevosProductos); }catch{}
+    try{ localStorage.setItem(KEYS.products, JSON.stringify(nuevosProductos)); }catch{}
+    try{
+      persistStore(KEYS.products,nuevosProductos);
+      setSyncStamp(KEYS.products,syncStamp);
+    }catch{}
+    try{
+      if(_sbReady && supabase){
+        const targetId=String(editing?editing.id:nuevosProductos[nuevosProductos.length-1]?.id);
+        await upsertProductsByIds([targetId], nuevosProductos, syncStamp);
+      }
+    }catch(e){
+      console.error('Error sincronizando producto:',e?.message||e);
+    }
     closeModal();
   };
-  const delP=id=>askConf('¿Eliminar este producto?',()=>{setProducts(ps=>ps.filter(p=>p.id!==id));showToast('Eliminado',C.red);});
+  const delP=id=>askConf('¿Eliminar este producto?',async()=>{
+    const nuevosProductos=safeList(products).filter(p=>p.id!==id);
+    setProducts(nuevosProductos);
+    const syncStamp=Date.now();
+    try{ await idbSet(KEYS.products, nuevosProductos); }catch{}
+    try{ localStorage.setItem(KEYS.products, JSON.stringify(nuevosProductos)); }catch{}
+    try{ persistStore(KEYS.products,nuevosProductos); setSyncStamp(KEYS.products,syncStamp); }catch{}
+    try{ if(_sbReady && supabase) await syncCollectionTable(KEYS.products, nuevosProductos, syncStamp, {prune:true}); }catch(e){ console.error('Error eliminando producto:',e?.message||e); }
+    showToast('Eliminado',C.red);
+  });
 
   /* ── CLIENTES ── */
   const openAddC=()=>{setCForm({nombre:'',email:'',telefono:'',direccion:'',fechaNacimiento:'',limiteCredito:''});setModal('addC');};
@@ -3090,7 +3187,7 @@ td{padding:5px 7px;border-bottom:1px solid #f0edf5;vertical-align:middle}
     const descMonto=cot.descuento>0?(cot.descuentoTipo==='pct'?subtotal*(cot.descuento/100):cot.descuento):0;
     const rows=cot.items.map((it,i)=>{
       const prod=safeList(products).find(p=>p.id===it.productoId||p.nombre===it.productoNombre);
-      const fotoHtml=prod?.foto?`<img src="${prod.foto}" style="width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid #ede8f0;display:block" alt="">`
+      const fotoHtml=productPrimaryImage(prod)?`<img src="${productPrimaryImage(prod)}" style="width:42px;height:42px;object-fit:cover;border-radius:6px;border:1px solid #ede8f0;display:block" alt="">`
         :`<div style="width:42px;height:42px;border-radius:6px;background:#fce7ef;display:flex;align-items:center;justify-content:center;font-size:18px">🏷️</div>`;
       return`<tr style="background:${i%2===0?'#faf9fb':'#fff'}">
         <td style="padding:8px 10px;width:52px">${fotoHtml}</td>
@@ -3530,7 +3627,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
         copy[ix]={...copy[ix], cantidad:curr+1, stock:max};
         return copy;
       }
-      return [...base,{id:prod.id,nombre:prod.nombre||'Producto',precio:+prod.precio||0,cantidad:1,foto:prod.foto||'',categoria:prod.categoria||'General',stock:max}];
+      return [...base,{id:prod.id,nombre:prod.nombre||'Producto',precio:+prod.precio||0,cantidad:1,foto:productPrimaryImage(prod)||'',categoria:prod.categoria||'General',stock:max}];
     });
     setCatalogCartOpen(true);
   };
@@ -3699,11 +3796,12 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
                 `%0A• Precio: ${encodeURIComponent(fmt(prod?.precio||0))}`+
                 `%0A• Categoría: ${encodeURIComponent(prod?.categoria||'General')}`+
                 ((prod?.codigoBarras)?`%0A• Código: ${encodeURIComponent(prod.codigoBarras)}`:'');
-              const waLink=catalogWhatsApp?`https://wa.me/${catalogWhatsApp}?text=${msg}`:null;
+              const precioCatalogo=(prod?.precioOferta&&+prod.precioOferta>0&&+prod.precioOferta<+prod.precio)?+prod.precioOferta:(+prod?.precio||0);
+              const waLink=catalogWhatsApp?`https://wa.me/${catalogWhatsApp}?text=${msg.replace(encodeURIComponent(fmt(prod?.precio||0)),encodeURIComponent(fmt(precioCatalogo)))}`:null;
               return (
                 <div key={prod.id} className="aa-cat-card" style={{background:'#fff',border:'1px solid #efdce7',borderRadius:isMobile?20:24,overflow:'hidden',boxShadow:'0 14px 44px rgba(120,80,140,0.08)',display:'flex',flexDirection:'column',minWidth:0}}>
-                  <div style={{position:'relative',aspectRatio:'1 / 1',background:prod?.foto?'#fff':'linear-gradient(135deg,#fff1f7 0%,#f8f3ff 100%)',display:'flex',alignItems:'center',justifyContent:'center'}}>
-                    {prod?.foto?<img src={prod.foto} alt={prod?.nombre||''} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<div style={{fontSize:isMobile?48:58}}>🎀</div>}
+                  <div style={{position:'relative',aspectRatio:'1 / 1',background:productPrimaryImage(prod)?'#fff':'linear-gradient(135deg,#fff1f7 0%,#f8f3ff 100%)',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                    {productPrimaryImage(prod)?<img src={productPrimaryImage(prod)} alt={prod?.nombre||''} style={{width:'100%',height:'100%',objectFit:'cover'}}/>:<div style={{fontSize:isMobile?48:58}}>🎀</div>}
                     <div style={{position:'absolute',top:10,left:10,background:agotado?'#fff3f0':'#effbf4',color:agotado?'#c2410c':'#15803d',border:`1px solid ${agotado?'#fdc4b4':'#b7e6c8'}`,borderRadius:999,padding:'6px 10px',fontWeight:800,fontSize:11}}>
                       {agotado?'Agotado':'Disponible'}
                     </div>
@@ -3716,14 +3814,15 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
                     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
                       <div>
                         <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:3}}>Precio</div>
-                        <div style={{fontSize:isMobile?20:24,fontWeight:900,color:'#cb2e71'}}>{fmt(prod?.precio||0)}</div>
+                        <div style={{display:'flex',flexDirection:'column',gap:2}}>{prod?.precioOferta&&+prod.precioOferta>0&&+prod.precioOferta<+prod.precio?<><div style={{fontSize:12,color:'#9a8a97',textDecoration:'line-through'}}>{fmt(prod?.precio||0)}</div><div style={{fontSize:isMobile?20:24,fontWeight:900,color:'#cb2e71'}}>{fmt(prod?.precioOferta||0)}</div></>:<div style={{fontSize:isMobile?20:24,fontWeight:900,color:'#cb2e71'}}>{fmt(prod?.precio||0)}</div>}</div>
                       </div>
                       <div style={{textAlign:'right'}}>
                         <div style={{fontSize:11,color:'#927f90',fontWeight:700,marginBottom:3}}>Stock</div>
-                        <div style={{fontSize:13,fontWeight:800,color:agotado?'#c2410c':'#2f2331'}}>{agotado?'Sin existencias':`${stock} disponible${stock!==1?'s':''}`}</div>
+                        <div style={{fontSize:13,fontWeight:800,color:agotado?'#c2410c':'#2f2331'}}>{prod?.estado==='por pedido'?'Por pedido':agotado?'Sin existencias':`${stock} disponible${stock!==1?'s':''}`}</div>
                       </div>
                     </div>
-                    {(prod?.codigoBarras||'')&&<div style={{fontSize:11,color:'#8f7c8d',background:'#faf6fa',border:'1px solid #f1e4ef',padding:'8px 10px',borderRadius:12,overflow:'hidden',textOverflow:'ellipsis'}}>Código: {prod.codigoBarras}</div>}
+                    {prod?.descripcionCorta&&<div style={{fontSize:12,color:'#6f5a6d',lineHeight:1.45}}>{prod.descripcionCorta}</div>}
+                    {(prod?.codigoBarras||''||prod?.marca)&&<div style={{fontSize:11,color:'#8f7c8d',background:'#faf6fa',border:'1px solid #f1e4ef',padding:'8px 10px',borderRadius:12,overflow:'hidden',textOverflow:'ellipsis'}}>{prod?.marca?`Marca: ${prod.marca}`:''}{prod?.marca&&prod?.codigoBarras?' · ':''}{prod?.codigoBarras?`Código: ${prod.codigoBarras}`:''}</div>}
                     <div style={{display:'grid',gridTemplateColumns:'1fr',gap:8,marginTop:'auto'}}>
                       {agotado?(
                         <button onClick={()=>waLink&&window.open(waLink,'_blank')} className="aa-soft-btn" style={{border:'1px solid #f3d6c9',background:'#fff7f4',color:'#c2410c',padding:'12px 14px',borderRadius:14,fontWeight:900,fontSize:13,cursor:'pointer'}}>
@@ -3941,7 +4040,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           return(
           <div key={p.id} onClick={()=>posAddProduct(p)} style={{background:C.card,border:`1px solid ${C.cardBorder}`,borderRadius:12,padding:'10px',cursor:'pointer',boxShadow:C.shadow,transition:'all 0.15s'}} onMouseEnter={e=>{e.currentTarget.style.borderColor=C.pink;e.currentTarget.style.background=C.pinkLight;}} onMouseLeave={e=>{e.currentTarget.style.borderColor=C.cardBorder;e.currentTarget.style.background=C.card;}}>
             <div style={{width:'100%',height:52,borderRadius:8,background:p.foto?'transparent':C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',marginBottom:7,overflow:'hidden'}}>
-              {p.foto?<img src={p.foto} alt="" style={{width:'100%',height:'100%',objectFit:'cover',borderRadius:8}}/>:<span style={{fontSize:22}}>🏷️</span>}
+              {productPrimaryImage(p)?<img src={productPrimaryImage(p)} alt="" style={{width:'100%',height:'100%',objectFit:'cover',borderRadius:8}}/>:<span style={{fontSize:22}}>🏷️</span>}
             </div>
             <div style={{fontWeight:700,fontSize:11,color:C.text,marginBottom:3,lineHeight:1.3}}>{p.nombre}</div>
             <div style={{fontWeight:800,fontSize:13,color:C.pink}}>{fmt(p.precio)}</div>
@@ -4286,7 +4385,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           return(
             <div key={p.id} style={{...S.card,padding:'12px',border:low?`1px solid ${C.redBorder}`:`1px solid ${C.cardBorder}`}}>
               <div style={{display:'flex',gap:10,alignItems:'flex-start'}}>
-                {p.foto?<img src={p.foto} alt="" style={{width:56,height:56,borderRadius:10,objectFit:'cover',border:`1px solid ${C.border}`,flexShrink:0}}/>:<div style={{width:56,height:56,borderRadius:10,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,flexShrink:0}}>🏷️</div>}
+                {productPrimaryImage(p)?<img src={productPrimaryImage(p)} alt="" style={{width:56,height:56,borderRadius:10,objectFit:'cover',border:`1px solid ${C.border}`,flexShrink:0}}/>:<div style={{width:56,height:56,borderRadius:10,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,flexShrink:0}}>🏷️</div>}
                 <div style={{flex:1,minWidth:0}}>
                   <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
                     <div style={{fontWeight:800,fontSize:14,color:C.text,lineHeight:1.2}}>{p.nombre}</div>
@@ -4325,7 +4424,7 @@ ${corte.porProducto.length>0?`<table><thead><tr><th>Producto</th><th>Uds.</th><t
           const low=p.stockMinimo>0&&p.stock<=p.stockMinimo;
           const prov=proveedoresSafe.find(x=>x.id===p.proveedorId);
           return<tr key={p.id} style={{background:low?'rgba(220,38,38,0.02)':''}} onMouseEnter={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.05)':'#faf9fb'} onMouseLeave={e=>e.currentTarget.style.background=low?'rgba(220,38,38,0.02)':''}>
-            <td style={{...S.td,width:38,padding:'6px 5px'}}>{p.foto?<img src={p.foto} alt="" style={{width:32,height:32,borderRadius:7,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:32,height:32,borderRadius:7,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🏷️</div>}</td>
+            <td style={{...S.td,width:38,padding:'6px 5px'}}>{productPrimaryImage(p)?<img src={productPrimaryImage(p)} alt="" style={{width:32,height:32,borderRadius:7,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:32,height:32,borderRadius:7,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:14}}>🏷️</div>}</td>
             <td style={{...S.td,fontWeight:700,fontSize:12}}>{p.nombre}{low&&<span style={{marginLeft:5,fontSize:9,background:C.redLight,color:C.red,borderRadius:5,padding:'1px 4px',fontWeight:700}}>⚠️</span>}</td>
             <td style={{...S.td,fontSize:10,color:C.textLight,fontFamily:'monospace'}}>{p.codigoBarras||'—'}</td>
             <td style={S.td}><Badge text={p.categoria||'—'} color={C.purple} bg={C.purpleLight}/></td>
@@ -5396,8 +5495,11 @@ Monto a pagar:`,cp.saldo.toFixed(2));
     <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'1fr 1fr',gap:11}}>
       <div style={{gridColumn:'1/-1'}}><label style={pErr.nombre?S.labelErr:S.label}>{pErr.nombre?'⚠ Nombre *':'Nombre'}</label><input value={pForm.nombre} onChange={e=>{setPForm({...pForm,nombre:e.target.value});setPErr(x=>({...x,nombre:false}));}} style={pErr.nombre?S.inputErr:S.input} placeholder="Ej: Aretes Dorados"/></div>
       <Fld label="Categoría" value={pForm.categoria} onChange={e=>setPForm({...pForm,categoria:e.target.value})} placeholder="Ej: Aretes"/>
+      <Fld label="Marca" value={pForm.marca} onChange={e=>setPForm({...pForm,marca:e.target.value})} placeholder="Ej: Beauty Creations"/>
+      <Sel label="Estado" value={pForm.estado} onChange={e=>setPForm({...pForm,estado:e.target.value})}><option value="disponible">Disponible</option><option value="por pedido">Por pedido</option><option value="agotado">Agotado</option></Sel>
       {pVariantes.length===0&&<Fld label="Stock inicial" type="number" value={pForm.stock} onChange={e=>setPForm({...pForm,stock:e.target.value})} min="0"/>}
       <div><label style={pErr.precio?S.labelErr:S.label}>{pErr.precio?'⚠ Precio (L) *':'Precio de Venta (L)'}</label><input type="number" value={pForm.precio} onChange={e=>{setPForm({...pForm,precio:e.target.value});setPErr(x=>({...x,precio:false}));}} style={pErr.precio?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
+      <div><label style={S.label}>Precio oferta (L)</label><input type="number" value={pForm.precioOferta} onChange={e=>setPForm({...pForm,precioOferta:e.target.value})} style={S.input} placeholder="Opcional" min="0"/></div>
       <div><label style={pErr.costo?S.labelErr:S.label}>{pErr.costo?'⚠ Costo (L) *':'Costo / Compra (L)'}</label><input type="number" value={pForm.costo} onChange={e=>{setPForm({...pForm,costo:e.target.value});setPErr(x=>({...x,costo:false}));}} style={pErr.costo?S.inputErr:S.input} placeholder="0.00" min="0"/></div>
       <div>
         <label style={S.label}>Código de Barras</label>
@@ -5411,6 +5513,16 @@ Monto a pagar:`,cp.saldo.toFixed(2));
         <Sel label="Proveedor" value={pForm.proveedorId} onChange={e=>setPForm({...pForm,proveedorId:e.target.value})}>
           <option value="">Sin proveedor</option>{proveedoresSafe.map(p=><option key={p.id} value={p.id}>{p.nombre}</option>)}
         </Sel>
+      </div>
+      <div style={{gridColumn:'1/-1'}}>
+        <label style={S.label}>Descripción corta</label>
+        <textarea value={pForm.descripcionCorta} onChange={e=>setPForm({...pForm,descripcionCorta:e.target.value})} rows={3} style={{...S.input,resize:'vertical'}} placeholder="Breve descripción para el catálogo"/>
+      </div>
+      <div style={{gridColumn:'1/-1',display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+        <label style={{display:'inline-flex',alignItems:'center',gap:8,fontSize:13,fontWeight:700,color:C.text}}>
+          <input type="checkbox" checked={pForm.visibleCatalogo!==false} onChange={e=>setPForm({...pForm,visibleCatalogo:e.target.checked})}/>
+          Visible en catálogo
+        </label>
       </div>
     </div>
 
@@ -5448,10 +5560,25 @@ Monto a pagar:`,cp.saldo.toFixed(2));
 
     {pForm.precio&&pForm.costo&&+pForm.precio>0&&<div style={{background:C.greenLight,border:`1px solid ${C.greenBorder}`,borderRadius:9,padding:'8px 12px',marginBottom:10,fontSize:12,display:'flex',gap:20}}><span>Margen: <strong style={{color:C.green}}>{pct((+pForm.precio-+pForm.costo)/+pForm.precio*100)}</strong></span><span>Ganancia: <strong style={{color:C.green}}>{fmt(+pForm.precio-+pForm.costo)}</strong></span></div>}
     <div style={{marginBottom:12}}>
-      <label style={S.label}>Foto</label>
-      <div style={{display:'flex',gap:10,alignItems:'center'}}>
-        {pForm.foto?<img src={pForm.foto} alt="" style={{width:60,height:60,borderRadius:8,objectFit:'cover',border:`1px solid ${C.border}`}}/>:<div style={{width:60,height:60,borderRadius:8,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,border:`2px dashed ${C.pinkMid}`}}>📷</div>}
-        <div><label style={{...S.btn,display:'inline-block',cursor:'pointer',fontSize:11,padding:'6px 12px'}}>{pForm.foto?'Cambiar':'Subir'}<input ref={fotoRef} type="file" accept="image/*" style={{display:'none'}} onChange={handleFoto}/></label>{pForm.foto&&<button onClick={()=>setPForm({...pForm,foto:''})} style={{...S.btnDanger,marginLeft:6,fontSize:10,padding:'5px 9px'}}>Quitar</button>}<div style={{fontSize:9,color:C.textLight,marginTop:3}}>Máx 800KB</div></div>
+      <label style={S.label}>Imágenes del producto</label>
+      <div style={{display:'flex',gap:10,alignItems:'center',flexWrap:'wrap'}}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+          {safeList(pForm.imagenes).length?safeList(pForm.imagenes).map((img,idx)=>(
+            <div key={img+idx} style={{position:'relative'}}>
+              <img src={img} alt="" style={{width:60,height:60,borderRadius:8,objectFit:'cover',border:`2px solid ${pForm.foto===img?C.pink:C.border}`}}/>
+              <button type="button" onClick={()=>setMainProductImage(img)} style={{position:'absolute',left:4,bottom:4,background:'rgba(255,255,255,.92)',border:`1px solid ${C.border}`,borderRadius:6,padding:'2px 5px',fontSize:9,cursor:'pointer'}}>{pForm.foto===img?'Portada':'Portada'}</button>
+              <button type="button" onClick={()=>removeProductImage(img)} style={{position:'absolute',top:-6,right:-6,width:20,height:20,borderRadius:'50%',border:'none',background:C.red,color:'#fff',cursor:'pointer',fontSize:11}}>×</button>
+            </div>
+          )):(
+            <div style={{width:60,height:60,borderRadius:8,background:C.pinkLight,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,border:`2px dashed ${C.pinkMid}`}}>📷</div>
+          )}
+        </div>
+        <div>
+          <label style={{...S.btn,display:'inline-block',cursor:'pointer',fontSize:11,padding:'6px 12px'}}>Portada<input ref={fotoRef} type="file" accept="image/*" style={{display:'none'}} onChange={handleFoto}/></label>
+          <label style={{...S.btnOutline,display:'inline-block',cursor:'pointer',fontSize:11,padding:'6px 12px',marginLeft:6}}>Agregar más<input type="file" multiple accept="image/*" style={{display:'none'}} onChange={handleExtraFotos}/></label>
+          {!!safeList(pForm.imagenes).length&&<button type="button" onClick={()=>setPForm({...pForm,foto:'',imagenes:[]})} style={{...S.btnDanger,marginLeft:6,fontSize:10,padding:'5px 9px'}}>Quitar todas</button>}
+          <div style={{fontSize:9,color:C.textLight,marginTop:3}}>Máx 800KB por imagen · la primera es la portada</div>
+        </div>
       </div>
     </div>
     {(pErr.nombre||pErr.precio||pErr.costo)&&<div style={{background:C.redLight,border:`1px solid ${C.redBorder}`,borderRadius:8,padding:'8px 12px',marginBottom:7,fontSize:11,color:C.red,fontWeight:600}}>⚠️ Completa los campos marcados en rojo.</div>}
